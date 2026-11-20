@@ -1,4 +1,7 @@
 use anyhow::{bail, Context, Result};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression as GzipLevel;
 use cpio::{NewcBuilder, NewcReader};
 use std::ffi::{CString, OsStr};
 use std::fs;
@@ -49,11 +52,21 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    /// Unpack an LZ4 (legacy framing) compressed newc archive, as Android
-    /// boot images carry.
+    /// Unpack the newc archive in `compressed`, however the image wraps it:
+    /// LZ4 in the legacy framing that Android boot images carry, gzip as
+    /// some makers' images do, or either of them after a maker's own header
+    /// that the bootloader keeps ahead of the archive.
     pub fn decode(compressed: &[u8]) -> Result<Self> {
+        let (at, format) = locate(compressed).with_context(|| format!("no LZ4 or gzip archive in {} bytes", compressed.len()))?;
         let mut cpio = Vec::new();
-        lz4_flex::frame::FrameDecoder::new(compressed).read_to_end(&mut cpio).context("lz4 decode")?;
+        match format {
+            Format::Lz4 => {
+                lz4_flex::frame::FrameDecoder::new(&compressed[at..]).read_to_end(&mut cpio).context("lz4 decode")?;
+            }
+            Format::Gzip => {
+                GzDecoder::new(&compressed[at..]).read_to_end(&mut cpio).context("gzip decode")?;
+            }
+        }
         let mut entries = Vec::new();
         let mut rest = Cursor::new(cpio.as_slice());
         loop {
@@ -80,11 +93,26 @@ impl Ramdisk {
         Ok(Ramdisk { entries })
     }
 
+    /// Pack the archive the way `format` names: LZ4 in the legacy framing
+    /// the kernel's initramfs unpacker reads, or gzip as some images carry.
+    pub fn encode_as(&self, format: Format) -> Result<Vec<u8>> {
+        match format {
+            Format::Lz4 => lz4_tool(&self.archive()?),
+            Format::Gzip => {
+                let mut out = Vec::new();
+                let mut encoder = GzEncoder::new(&mut out, GzipLevel::best());
+                encoder.write_all(&self.archive()?)?;
+                encoder.finish()?;
+                Ok(out)
+            }
+        }
+    }
+
     /// Pack as a newc archive compressed the way AOSP packs boot ramdisks,
     /// with the reference `lz4` tool in legacy framing (the kernel's initramfs
     /// unpacker reads no other LZ4 framing) at its highest compression.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        lz4_tool(&self.archive()?)
+        self.encode_as(Format::Lz4)
     }
 
     /// Pack as a newc archive, uncompressed.
@@ -250,6 +278,30 @@ fn set_time(path: &Path, mtime: u32) -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("give it its time");
     }
     Ok(())
+}
+
+/// How a boot image wraps its newc ramdisk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Lz4,
+    Gzip,
+}
+
+/// Where the archive starts in `bytes`, after any maker's own header, and
+/// how it is wrapped: the first place one of the formats opens. A boot
+/// image may keep a header of its own ahead of the archive, as Xiaomi's
+/// does, two pages of it.
+pub fn locate(bytes: &[u8]) -> Option<(usize, Format)> {
+    for at in 0..bytes.len().saturating_sub(4) {
+        let rest = &bytes[at..];
+        if rest.starts_with(&[0x02, 0x21, 0x4c, 0x18]) {
+            return Some((at, Format::Lz4));
+        }
+        if rest.starts_with(&[0x1f, 0x8b]) {
+            return Some((at, Format::Gzip));
+        }
+    }
+    None
 }
 
 /// The legacy LZ4 framing's magic number.

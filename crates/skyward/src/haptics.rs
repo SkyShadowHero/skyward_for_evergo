@@ -5,7 +5,7 @@ use skyward_config::Strength;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,15 @@ const TICKS_STRENGTH: f32 = 0.415;
 /// phone's own system leaves them: the motor comes to rest on its own
 /// before taking them away brakes it.
 const TICKS_REST: Duration = Duration::from_millis(40);
+
+/// The number of the phone's own tick waveform on a driver that keeps its
+/// waveforms, which the screen going off plays: Android numbers the click
+/// before it, then the double click, so the tick is the third.
+const TICK_WAVEFORM: i16 = 2;
+/// The drivers of the phones' older Awinic motors, which keep the click and
+/// tick waveforms the phone's own system plays and load nothing from made
+/// samples, named as the kernel registers the input device's driver.
+const KEPT_WAVEFORM_DRIVERS: [&str; 4] = ["awinic_haptic", "aw8697_haptic", "aw86927_haptic", "aw8624_haptic"];
 
 /// The vibration motor, played through the kernel's force-feedback
 /// events. The driver fills its queue with a made click's samples as the
@@ -56,10 +65,15 @@ impl Haptics {
     /// only as it is played.
     pub fn open(cfg: &skyward_config::Haptics) -> Result<Haptics> {
         let (path, dev) = motor()?;
+        let kept = keeps_waveforms(&path);
         let hz = resonance(&cfg.resonance)?;
         let click = match cfg.click {
             Some(id) => {
-                eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
+                if kept {
+                    eprintln!("haptics {}: clicks with waveform {id}, ticks with waveform {TICK_WAVEFORM}", path.display());
+                } else {
+                    eprintln!("haptics {}: clicks with waveform {id}, ticks made for a motor swinging at {hz} Hz", path.display());
+                }
                 Click::Kept(id)
             }
             None => {
@@ -67,7 +81,14 @@ impl Haptics {
                 Click::Samples { data: made(hz), rate: RATE }
             }
         };
-        let ticks = Click::Samples { data: ticks(hz), rate: TICKS_RATE };
+        // A driver that keeps its waveforms plays the phone's own tick for
+        // the screen going off; one that plays made samples has the ticks
+        // made for the motor's frequency.
+        let ticks = if kept && cfg.click.is_some() {
+            Click::Kept(TICK_WAVEFORM)
+        } else {
+            Click::Samples { data: ticks(hz), rate: TICKS_RATE }
+        };
         Ok(Haptics { dev, click, ticks, strength: cfg.strength, playing: Arc::new(Mutex::new(None)), clicks: 0 })
     }
 
@@ -147,6 +168,21 @@ fn motor() -> Result<(PathBuf, File)> {
 
 fn takes_periodic(dev: &RawDevice) -> bool {
     dev.supported_ff().is_some_and(|ff| ff.contains(evdev::FFEffectCode::FF_PERIODIC))
+}
+
+/// Whether the driver behind the input device at `path` keeps the click and
+/// tick waveforms the phone's own system plays, rather than playing the
+/// samples it is handed: told by the name of the driver the kernel
+/// registered the input device for, a link on the device that made it.
+fn keeps_waveforms(path: &Path) -> bool {
+    let Some(name) = path.file_name() else { return false };
+    let Ok(input) = fs::canonicalize(Path::new("/sys/class/input").join(name).join("device")) else { return false };
+    for dir in input.ancestors().skip(1) {
+        let Ok(driver) = fs::read_link(dir.join("driver")) else { continue };
+        let Some(driver) = driver.file_name().and_then(|name| name.to_str()) else { continue };
+        return KEPT_WAVEFORM_DRIVERS.contains(&driver);
+    }
+    false
 }
 
 /// The motor's resonant frequency in hertz, from the file the driver says

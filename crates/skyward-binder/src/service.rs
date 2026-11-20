@@ -85,7 +85,7 @@ pub fn version(service: &crate::driver::Handle, interface: &str) -> Result<i32> 
 #[cfg(target_os = "android")]
 pub fn find<'a>(binder: &'a crate::driver::Binder, name: &str) -> Result<Option<crate::driver::Handle<'a>>> {
     let directory = binder.directory()?;
-    let mut call = Parcel::call(DIRECTORY);
+    let mut call = Parcel::call_system(DIRECTORY);
     call.string(name);
     let reply = directory.transact(methods()?.check_service, &call).with_context(|| format!("look up {name}"))?;
     let mut read = reply.read();
@@ -103,7 +103,7 @@ pub fn find<'a>(binder: &'a crate::driver::Binder, name: &str) -> Result<Option<
 #[cfg(target_os = "android")]
 pub fn add(binder: &crate::driver::Binder, name: &str, number: u64) -> Result<()> {
     let directory = binder.directory()?;
-    let mut call = Parcel::call(DIRECTORY);
+    let mut call = Parcel::call_system(DIRECTORY);
     call.string(name);
     call.object(number);
     call.bool(false);
@@ -117,7 +117,7 @@ pub fn add(binder: &crate::driver::Binder, name: &str, number: u64) -> Result<()
 #[cfg(target_os = "android")]
 pub fn names(binder: &crate::driver::Binder) -> Result<Vec<String>> {
     let directory = binder.directory()?;
-    let mut call = Parcel::call(DIRECTORY);
+    let mut call = Parcel::call_system(DIRECTORY);
     call.i32(DUMP_PRIORITY_ALL);
     let reply = directory.transact(methods()?.list_services, &call).context("list what has registered")?;
     let mut read = reply.read();
@@ -149,7 +149,7 @@ pub fn interface(service: &crate::driver::Handle) -> Result<String> {
 #[cfg(target_os = "android")]
 pub fn declared(binder: &crate::driver::Binder, name: &str) -> Result<bool> {
     let directory = binder.directory()?;
-    let mut call = Parcel::call(DIRECTORY);
+    let mut call = Parcel::call_system(DIRECTORY);
     call.string(name);
     let reply = directory.transact(methods()?.is_declared, &call).with_context(|| format!("ask whether {name} is described"))?;
     let mut read = reply.read();

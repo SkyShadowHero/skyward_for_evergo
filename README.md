@@ -122,6 +122,9 @@ not been verified.
 | 🚧 REDMI K90 Ultra | `warsaw` | OS3.0.309.0.WHPCNXM (Android 16) |
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM (Android 17) |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM (Android 17) |
+| 🚧 Redmi Note 11 5G | `evergo` | V816.0.1.0.TGBCNXM (Android 12), boot partition |
+
+The Redmi Note 11 5G has no recovery partition: its stock boot image carries Android's recovery and is flashed as the recovery. Build its image on the phone's own boot image with `--partition boot`, and add the Novatek touch firmware to the ramdisk as described under [Building](#building).
 
 ## Installing Skyward
 
@@ -238,6 +241,32 @@ target/release/skyward-pack recovery \
   --out target/skyward-nezha.img
 ```
 
+
+The Redmi Note 11 5G has no recovery partition: its boot image carries both the
+system and recovery. Take the phone's own boot image (a Magisk-patched one keeps
+root) and pack onto that, naming the boot partition and putting the Novatek
+touch firmware where the kernel looks for it:
+
+```sh
+target/release/skyward-pack recovery \
+  --stock magisk_patched.img \
+  --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
+  --config devices/evergo.toml \
+  --font resources/fonts/MiSansVF.ttf \
+  --mono resources/fonts/KirkMono-Regular.ttf \
+  --mono-license resources/fonts/KirkMono-OFL.txt \
+  --partition boot \
+  --add vendor/firmware/novatek_ts_fw.bin=/path/to/novatek_ts_fw.bin \
+  --add vendor/firmware/novatek_ts_mp.bin=/path/to/novatek_ts_mp.bin \
+  --add vendor/firmware/novatek_ts_ct_fw.bin=/path/to/novatek_ts_ct_fw.bin \
+  --add vendor/firmware/novatek_ts_ct_mp.bin=/path/to/novatek_ts_ct_mp.bin \
+  --out target/skyward-evergo.img
+```
+
+Flash it to the current boot slot with `fastboot flash boot target/skyward-evergo.img`
+and start recovery with the key combination; a normal boot still starts the system.
+
 Tests and lints run on the computer; what runs only on the phone is linted for it:
 
 ```sh
@@ -263,6 +292,10 @@ such as `en` or `zh-TW`:
 ```sh
 cargo run --release -p skyward-preview -- target/preview --lang en
 ```
+
+## Maintainer
+
+- 天影大侠 (SkyShadowHero)
 
 ## License
 

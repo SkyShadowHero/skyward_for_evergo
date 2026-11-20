@@ -5,10 +5,17 @@
 use crate::{prop, set_prop, wait_prop};
 use anyhow::{ensure, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static MTP: AtomicBool = AtomicBool::new(false);
+
+/// One change of the port at a time. The pages ask for one while the MTP
+/// thread may ask for another, and a phone's controller takes ill to two
+/// setups of the port at once: the properties then say it is in a state it
+/// never reaches, and the port can be left with no function on it.
+static CHANGING: Mutex<()> = Mutex::new(());
 
 /// What the port offers while nothing else has it.
 pub fn resting() -> &'static str {
@@ -25,9 +32,20 @@ pub fn set_mtp(on: bool) {
     MTP.store(on, Ordering::Relaxed);
 }
 
+/// What init says the port offers now.
+pub fn state() -> Option<String> {
+    prop("sys.usb.state")
+}
+
 /// Ask init for `config` and wait until it is in place. Going to "none"
 /// also waits for adbd to be gone, so its function is free.
 pub fn set(config: &str, timeout: Duration) -> Result<()> {
+    let _changing = changing();
+    set_taking(config, timeout)
+}
+
+/// `set`, with the port's changes already held.
+fn set_taking(config: &str, timeout: Duration) -> Result<()> {
     set_prop("sys.usb.config", config)?;
     wait_prop("sys.usb.state", config, timeout)?;
     if config == "none" {
@@ -44,6 +62,29 @@ pub fn set(config: &str, timeout: Duration) -> Result<()> {
 /// serving it and takes every function off; init then sets the port up
 /// once the programs behind the new configuration are ready.
 pub fn switch(config: &str, timeout: Duration) -> Result<()> {
-    set("none", timeout)?;
-    set(config, timeout)
+    let _changing = changing();
+    switch_taking(config, timeout)
+}
+
+/// `switch`, with the port's changes already held.
+fn switch_taking(config: &str, timeout: Duration) -> Result<()> {
+    set_taking("none", timeout)?;
+    set_taking(config, timeout)
+}
+
+/// `switch`, or nothing at all where the port offers `config` already: a
+/// port set up again costs a computer the connection it has, and taking the
+/// functions off and putting them back for nothing is the one change a
+/// controller does not always come back from.
+pub fn switch_if_needed(config: &str, timeout: Duration) -> Result<()> {
+    let _changing = changing();
+    if state().as_deref() == Some(config) {
+        return Ok(());
+    }
+    switch_taking(config, timeout)
+}
+
+/// Wait a change of the port under way, out of the others' way.
+fn changing() -> MutexGuard<'static, ()> {
+    CHANGING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

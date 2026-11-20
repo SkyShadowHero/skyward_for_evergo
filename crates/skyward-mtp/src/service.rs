@@ -15,7 +15,7 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -65,6 +65,9 @@ pub struct Service {
     messages: Teller<Message>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<Result<()>>>,
+    /// Why the thread ended, set as it does, so the pages can say what the
+    /// computer was doing besides that the service is gone.
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl Service {
@@ -74,16 +77,24 @@ impl Service {
         let (messages, asked) = worker::telling().context("make the MTP thread's wake pipe")?;
         let port = Port::open(asked.fd())?;
         let stop = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
         let responder = Responder::new(device, zone, stop.clone());
         let mail = Mailbox { asked, pending: VecDeque::new(), stop: stop.clone() };
         skyward_sys::set_prop(READY, "1")?;
+        let told = failure.clone();
         let thread = thread::Builder::new()
             .name("mtp".into())
             .spawn(move || {
                 let mut port = port;
                 let served = serve(&mut port, responder, mail);
                 if let Err(e) = &served {
+                    *lock(&told) = Some(format!("{e:#}"));
                     let _ = kmsg(&format!("mtp: file transfer stops: {e:#}"));
+                    // The function's descriptors go with the thread, so init
+                    // must not be told the function is ready to bind any more:
+                    // a port set up with a function that has none is left
+                    // without adb too.
+                    let _ = skyward_sys::set_prop(READY, "0");
                     // The port loses the function with its descriptors, and
                     // with it adb, unless it offers adb alone first.
                     skyward_sys::usb::set_mtp(false);
@@ -97,13 +108,17 @@ impl Service {
                 served
             })
             .context("start the MTP thread")?;
-        Ok(Service { messages, stop, thread: Some(thread) })
+        Ok(Service { messages, stop, thread: Some(thread), failure })
     }
 
-    /// Whether the thread still serves; one that failed says why once
-    /// stopped.
+    /// Whether the thread still serves; one that failed says why.
     pub fn running(&self) -> bool {
         self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
+
+    /// Why the thread ended, once it has.
+    pub fn failure(&self) -> Option<String> {
+        lock(&self.failure).clone()
     }
 
     fn send(&self, message: Message) -> Result<()> {
@@ -137,10 +152,26 @@ impl Service {
         self.stop.store(true, Ordering::Relaxed);
         // A thread that has ended already says why when joined.
         let _ = self.send(Message::Stop);
-        let served = thread.join().expect("the MTP thread does not panic");
+        // A thread that panicked must not take the recovery with it: the
+        // pages say file transfer stopped, and what is left of the process
+        // still serves adb.
+        let served = match thread.join() {
+            Ok(served) => served,
+            Err(_) => {
+                let why = "the MTP thread ended on a panic".to_string();
+                *lock(&self.failure) = Some(why.clone());
+                Err(anyhow!(why))
+            }
+        };
         skyward_sys::set_prop(READY, "0")?;
         served
     }
+}
+
+/// A lock held no matter what a thread that panicked held it for: the
+/// failure is written and read on both sides of the thread's end.
+fn lock(m: &Mutex<Option<String>>) -> MutexGuard<'_, Option<String>> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Drop for Service {

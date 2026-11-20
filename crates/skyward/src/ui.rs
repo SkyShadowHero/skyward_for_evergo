@@ -91,18 +91,9 @@ struct Backlight {
 
 impl Backlight {
     fn open() -> Result<Self> {
-        let mut dirs: Vec<PathBuf> = fs::read_dir("/sys/class/backlight")
-            .context("read /sys/class/backlight")?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<std::io::Result<_>>()?;
-        dirs.sort();
-        // Qualcomm panels expose panel0-backlight; take it when present.
-        let dir = dirs
-            .iter()
-            .find(|d| d.file_name().is_some_and(|n| n == "panel0-backlight"))
-            .or(dirs.first())
-            .ok_or_else(|| anyhow!("no backlight device"))?
-            .clone();
+        // Qualcomm phones keep the panel's backlight under /sys/class/backlight;
+        // MediaTek's panel driver keeps it as an LED under /sys/class/leds.
+        let dir = backlight_dir().context("find the panel's backlight")?;
         let read = |name: &str| -> Result<u32> {
             fs::read_to_string(dir.join(name))
                 .with_context(|| format!("read {}/{name}", dir.display()))?
@@ -110,7 +101,17 @@ impl Backlight {
                 .parse()
                 .with_context(|| format!("parse {name}"))
         };
-        let top = normal_max(read("max_brightness")?)?;
+        let max = read("max_brightness")?;
+        // The display driver's own device tree gives the normal maximum on
+        // Qualcomm phones. MediaTek's LED has no such node, and its whole
+        // range is the slider's.
+        let top = match normal_max(max) {
+            Ok(top) => top,
+            Err(e) => {
+                eprintln!("backlight {}: using its whole range: {e:#}", dir.display());
+                max
+            }
+        };
         let level = read("brightness")?;
         Ok(Backlight { path: dir.join("brightness"), top, level })
     }
@@ -126,6 +127,25 @@ impl Backlight {
         }
         Ok(())
     }
+}
+
+/// The folder of the panel's backlight: the first backlight device, panel0
+/// where Qualcomm's driver makes one, or MediaTek's LED named for the LCD.
+fn backlight_dir() -> Result<PathBuf> {
+    for (folder, names) in [("/sys/class/backlight", &["panel0-backlight"][..]), ("/sys/class/leds", &["lcd-backlight", "lcd_backlight"][..])] {
+        let Ok(entries) = fs::read_dir(folder) else { continue };
+        let mut dirs: Vec<PathBuf> = entries.map(|e| e.map(|e| e.path())).collect::<std::io::Result<_>>().with_context(|| format!("list {folder}"))?;
+        dirs.sort();
+        if let Some(dir) = dirs.iter().find(|d| d.file_name().is_some_and(|n| names.iter().any(|name| n == *name))) {
+            return Ok(dir.clone());
+        }
+        if folder == "/sys/class/backlight"
+            && let Some(dir) = dirs.first()
+        {
+            return Ok(dir.clone());
+        }
+    }
+    Err(anyhow!("neither /sys/class/backlight nor /sys/class/leds has an LCD backlight"))
 }
 
 /// How a panel's node in the device tree may give its normal maximum: the
@@ -227,10 +247,12 @@ impl Transfer {
         Ok(())
     }
 
-    /// Stop serving: a port at rest goes back to adb alone first.
+    /// Stop serving: a port at rest goes back to adb alone first. A port
+    /// that has gone back already, as the thread does when it ends on its
+    /// own, is left as it is.
     fn stop(self, rests: bool) -> Result<()> {
         skyward_sys::usb::set_mtp(false);
-        let switched = if rests { skyward_sys::usb::switch("adb", USB_TIMEOUT) } else { Ok(()) };
+        let switched = if rests { skyward_sys::usb::switch_if_needed("adb", USB_TIMEOUT) } else { Ok(()) };
         let stopped = self.service.stop();
         switched.and(stopped)
     }
@@ -1334,6 +1356,18 @@ impl<'a> Pages<'a> {
             }
         };
         app.state.phone_logs = cfg.wipe.logs.len();
+        // The flashlight's switch shows the state the phone is in as the
+        // pages come up; a switch that cannot be read leaves its row out.
+        app.state.flashlight = match &cfg.flashlight {
+            Some(flashlight) => match crate::torch::status(flashlight) {
+                Ok(on) => Some(on),
+                Err(e) => {
+                    skyward_sys::kmsg(&format!("the flashlight's switch cannot be read: {e:#}"))?;
+                    None
+                }
+            },
+            None => None,
+        };
         // Skyward lives in a recovery partition of each slot where the phone
         // has them, and the install page then offers to keep it there. Such a
         // phone holds a second system where it also has boot and init_boot
@@ -1515,12 +1549,15 @@ impl<'a> Pages<'a> {
         if let (Some(worker), false, false) = (self.systems_worker.as_mut(), self.switch_asked, self.fastboot) {
             worker.send(systems::Task::Resume);
         }
-        // The port came up with adb alone; at rest it offers file transfer
-        // beside it.
-        if self.transfer.is_some()
-            && !self.fastboot
+        // The port comes up once, with what it is to rest at: file transfer
+        // beside adb where its switch is on, and adb alone where it is not,
+        // or where file transfer could not start. A port that offers that
+        // already is left as it is: taking a computer's functions off and
+        // putting them back costs it the connection, and asks a phone's
+        // controller to come up again for nothing.
+        if !self.fastboot
             && !self.sideloading
-            && let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT)
+            && let Err(e) = skyward_sys::usb::switch_if_needed(skyward_sys::usb::resting(), USB_TIMEOUT)
         {
             skyward_sys::kmsg(&format!("the port did not take file transfer: {e:#}"))?;
             self.app.report(&format!("{e:#}"), monotonic_ms());
@@ -1643,6 +1680,23 @@ impl<'a> Pages<'a> {
     fn ticks(&mut self) -> Result<()> {
         if let Some(h) = &mut self.haptics {
             h.ticks()?;
+        }
+        Ok(())
+    }
+
+    /// Light the flashlight or darken it, as the settings page asked, and
+    /// have its switch show what the phone says by then; one that cannot be
+    /// lit is the page's to report.
+    fn torch(&mut self, on: bool, now: u64) -> Result<()> {
+        let flashlight = self.cfg.flashlight.as_ref().context("this phone's flash driver leaves no torch switch")?;
+        match crate::torch::set(flashlight, on) {
+            Ok(lit) => self.app.set_flashlight(lit),
+            Err(e) => {
+                if let Ok(lit) = crate::torch::status(flashlight) {
+                    self.app.set_flashlight(lit);
+                }
+                self.app.report(&format!("{e:#}"), now);
+            }
         }
         Ok(())
     }
@@ -2323,6 +2377,17 @@ impl Pages<'_> {
         Ok(())
     }
 
+    /// Read the phone's details again at once, as after the data partition
+    /// opens: the room in it, which the pages show, was unknown until then.
+    fn refresh_details(&mut self) -> Result<()> {
+        self.read_at = Instant::now();
+        if let Ok(all) = skyward_info::collect(self.cfg) {
+            self.info = all;
+            self.app.refresh();
+        }
+        Ok(())
+    }
+
     /// How opening the data partition, or a user's own files in it, ended.
     fn decrypt_told(&mut self, now: u64) -> Result<()> {
         let Some(ended) = self.decryptor.as_ref().and_then(Decryptor::ended) else { return Ok(()) };
@@ -2334,6 +2399,7 @@ impl Pages<'_> {
                 }
                 self.closed = opening.closed;
                 show_closed(&mut self.app, &self.closed)?;
+                self.refresh_details()?;
             }
             decrypt::Ended::Opened(Err(why)) => {
                 skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
@@ -2349,6 +2415,7 @@ impl Pages<'_> {
             decrypt::Ended::Unlocked(Ok(still)) => {
                 self.closed = still;
                 show_closed(&mut self.app, &self.closed)?;
+                self.refresh_details()?;
             }
             decrypt::Ended::Unlocked(Err(why)) => {
                 skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
@@ -2403,7 +2470,11 @@ impl Pages<'_> {
     /// not follow, or whose service ended, stops, and the page says why.
     fn offer_storage(&mut self, now: u64) -> Result<()> {
         let kept = match &mut self.transfer {
-            Some(t) if !t.service.running() => Err(anyhow!("the file transfer service ended")),
+            // An ended service's own reason says more than its ending does.
+            Some(t) if !t.service.running() => Err(match t.service.failure() {
+                Some(why) => anyhow!("the file transfer service ended: {why}"),
+                None => anyhow!("the file transfer service ended"),
+            }),
             Some(t) => {
                 let offer = self.app.state.data.storage_open() && self.eraser.is_none() && self.installer.is_none();
                 t.offer(offer, self.app.state.lang).and_then(|()| {
@@ -2498,6 +2569,7 @@ impl Pages<'_> {
             Effect::ShellTo(folder) => self.shell_to(&folder, now)?,
             Effect::Haptic => self.click()?,
             Effect::Ticks => self.ticks()?,
+            Effect::Torch(on) => self.torch(on, now)?,
             // The panel shows the last frame drawn, which is what is
             // saved; one that cannot be is the page's to report.
             Effect::Screenshot { storage } => {
@@ -2973,7 +3045,7 @@ impl Pages<'_> {
     /// port goes through "none"; then the slot's partitions come up as at
     /// boot.
     fn enter_recovery(&mut self) -> Result<()> {
-        skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT)?;
+        skyward_sys::usb::switch_if_needed(skyward_sys::usb::resting(), USB_TIMEOUT)?;
         let slot = skyward_vab::current_slot()?.context("not an A/B phone")?;
         crate::prepare(self.cfg, slot)?;
         self.read_at = Instant::now();
@@ -2995,7 +3067,7 @@ impl Pages<'_> {
                 Ok(t) => {
                     self.transfer = Some(t);
                     if rests
-                        && let Err(e) = skyward_sys::usb::switch(skyward_sys::usb::resting(), USB_TIMEOUT)
+                        && let Err(e) = skyward_sys::usb::switch_if_needed(skyward_sys::usb::resting(), USB_TIMEOUT)
                     {
                         skyward_sys::kmsg(&format!("the port did not take file transfer: {e:#}"))?;
                         self.app.report(&format!("{e:#}"), now);
@@ -3003,6 +3075,14 @@ impl Pages<'_> {
                 }
                 Err(e) => {
                     skyward_sys::kmsg(&format!("file transfer did not start: {e:#}"))?;
+                    // File transfer could not start, so the port is left with
+                    // adb alone rather than with no function on it.
+                    skyward_sys::usb::set_mtp(false);
+                    if rests
+                        && let Err(e) = skyward_sys::usb::switch_if_needed(skyward_sys::usb::resting(), USB_TIMEOUT)
+                    {
+                        skyward_sys::kmsg(&format!("the port did not take adb alone: {e:#}"))?;
+                    }
                     self.app.file_transfer_failed(false, &skyward_ui::fmt::transfer_failed(self.app.state.lang, &format!("{e:#}")), now);
                 }
             },

@@ -29,6 +29,8 @@ pub enum Switch {
     Wlan,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
+    /// Light the flashlight, or darken it.
+    Torch,
 }
 
 /// How long the screen stays on with nothing touched, in milliseconds, in
@@ -51,6 +53,13 @@ pub const TIME_ZONES: [(Text, Text, &str); 9] = [
 ];
 
 impl App {
+    /// The flashlight's switch shows how the phone stands on the LED, once
+    /// it has been asked to light it or darken it.
+    pub fn set_flashlight(&mut self, on: bool) {
+        self.state.flashlight = Some(on);
+        self.refresh();
+    }
+
     pub(super) fn set_slider(&mut self, t: &Theme, which: Slider, track: Rect, x: f32) {
         self.set_level(t, which, track, (x - track.x) / track.w);
     }
@@ -100,6 +109,24 @@ mod tests {
         assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::FileTransfer), 3000), [Effect::FileTransfer(true)]);
         app.file_transfer_failed(false, "无法开启文件传输", 4000);
         assert!(!app.state.file_transfer, "the switch shows how it stands");
+    }
+
+    #[test]
+    fn the_flashlight_switch_has_the_runtime_light_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Settings, W, H, PPD);
+        assert!(!app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Toggle(Switch::Torch)), "no switch on a phone whose driver leaves none");
+        app.state.flashlight = Some(false);
+        app.refresh();
+        let (_, y) = spot(&mut app, &f, &i, Action::Toggle(Switch::Torch));
+        if y > H as f32 * 0.9 {
+            scroll_to(&mut app, &f, y - H as f32 * 0.8, 0);
+        }
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::Torch), 2000), [Effect::Torch(true)]);
+        assert_eq!(app.state.flashlight, Some(true), "the switch shows what the page asked");
+        app.set_flashlight(false);
+        assert_eq!(app.state.flashlight, Some(false), "and what the phone says once it is asked");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Toggle(Switch::Torch), 3000), [Effect::Torch(true)]);
     }
 
     #[test]

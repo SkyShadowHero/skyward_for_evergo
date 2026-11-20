@@ -61,6 +61,9 @@ pub struct DeviceConfig {
     /// The vibration motor's click, on phones that have one.
     #[serde(default)]
     pub haptics: Option<Haptics>,
+    /// The flashlight's switch, on phones whose flash driver leaves one.
+    #[serde(default)]
+    pub flashlight: Option<Flashlight>,
     /// The recovery's own logd, on phones whose recovery leaves out
     /// libraries it needs.
     #[serde(default)]
@@ -224,6 +227,14 @@ pub struct Haptics {
 pub struct Strength {
     pub lightest: f32,
     pub strongest: f32,
+}
+
+/// The flashlight's switch, the file the phone's flash driver leaves for
+/// it: writing 1 lights the LED as a torch, and 0 darkens it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Flashlight {
+    /// The switch to write 1 or 0 to.
+    pub path: String,
 }
 
 /// What the recovery's own logd, which keeps what programs log for
@@ -554,6 +565,10 @@ impl DeviceConfig {
                 ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
             }
         }
+        if let Some(flashlight) = &cfg.flashlight {
+            let file = &flashlight.path;
+            ensure!(Path::new(file).is_absolute(), "[flashlight] path: {file} is not an absolute path");
+        }
         for owners in &cfg.owners {
             for name in [&owners.user, &owners.group] {
                 ensure!(!name.is_empty() && !name.contains(char::is_whitespace), "[[owners]] {name:?} is not an account's name");
@@ -832,6 +847,42 @@ mod tests {
         assert!(with("by-name/persist").is_err());
         assert!(with("").is_err());
         assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().partitions.mounted.is_empty(), "a phone may need none");
+    }
+
+    #[test]
+    fn parses_evergo() {
+        let cfg = DeviceConfig::parse(include_str!("../../../devices/evergo.toml")).unwrap();
+        assert_eq!(cfg.device.codename, "evergo");
+        assert!(cfg.device.ab, "the phone starts from either boot slot");
+        assert_eq!(cfg.display.width, 1080);
+        assert_eq!(cfg.display.height, 2400);
+        assert_eq!(cfg.display.density, 440);
+        assert_eq!(cfg.modules.load, ["connfem", "wmt_drv"], "the connectivity chip's own drivers, as its init loads them");
+        assert_eq!(cfg.partitions.mounted, ["persist"], "the secure world's files are there for it");
+        assert_eq!(cfg.device.os_version_prop, "ro.mi.os.version.incremental");
+        assert_eq!(cfg.backup.efs, ["nvdata", "nvcfg", "protect1", "protect2", "persist"]);
+        assert!(cfg.stock.is_none(), "the image is built on the phone's boot partition, which no OTA package carries");
+        let flashlight = cfg.flashlight.expect("the phone's flash driver leaves a switch for the torch");
+        assert_eq!(flashlight.path, "/sys/devices/platform/flashlights_mt6360/torch_brightness");
+        let fuelgauged = cfg
+            .services
+            .iter()
+            .find(|s| s.args.iter().any(|a| a == "/vendor/bin/fuelgauged"))
+            .expect("the gauge's daemon runs in this recovery, not in the phone's own init");
+        assert_eq!(fuelgauged.path, "/apex/com.android.runtime/bin/linker", "the program is 32-bit, and the installed system's runtime carries that ABI's loader");
+        assert_eq!(fuelgauged.user.as_deref(), Some("root"), "as the phone's own init runs it");
+        assert_eq!(fuelgauged.groups, ["root", "system"]);
+        assert!(!fuelgauged.oneshot, "the daemon stays, as init keeps it running");
+    }
+
+    #[test]
+    fn a_flashlight_is_switched_by_an_absolute_file() {
+        let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[flashlight]\n{body}\n"));
+        assert!(with("path = \"/sys/devices/platform/flashlights_mt6360/torch_brightness\"").is_ok());
+        for bad in ["path = \"sys/devices/platform/flashlights_mt6360/torch_brightness\"", "path = \"\""] {
+            assert!(with(bad).is_err(), "{bad} is refused");
+        }
+        assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().flashlight.is_none(), "a phone may have none");
     }
 
     #[test]

@@ -167,7 +167,7 @@ impl App {
     pub fn compose(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
         let charge = self.charging.as_ref().map_or(0.0, |c| c.shown.level(now));
         if charge < 1.0 {
-            self.compose_page(out, f, info, clock, now);
+            self.compose_page(out, f, info, clock, now, true);
         }
         if charge > 0.0 {
             self.compose_charging(out, f, info, charge, now);
@@ -199,7 +199,7 @@ impl App {
     /// page, the `<`, the page sliding in or out over or under the page
     /// left, the status bar, any message, and the back cue while a swipe
     /// from an edge is under way.
-    fn compose_page(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) {
+    fn compose_page(&mut self, out: &mut Canvas, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64, chrome: bool) {
         // A page opened is drawn from its left edge as it slides in.
         let opening = self.turn.as_ref().is_some_and(|t| !t.back);
         self.render(f, info, if opening { 0 } else { self.w });
@@ -314,26 +314,63 @@ impl App {
             }
             None => {
                 self.layer = None;
+                let swipe = self.edge_swipe();
+                if swipe.is_some() && self.preview.is_none() {
+                    self.preview = self.capture_preview(f, info, clock, now);
+                }
                 self.paint_page(out, &t, Some((f, info)), &view);
+                if let (Some((travel, _)), Some(preview)) = (swipe, &self.preview) {
+                    // The page under is the one the preview was drawn of: the
+                    // stack goes nowhere while a finger swipes in from an edge.
+                    let (screen, scroll, _) = self.stack[self.stack.len() - 2];
+                    debug_assert_eq!((preview.screen, preview.scroll), (screen, scroll), "the preview is of the page under");
+                    compose_prediction(out, travel, &preview.canvas, self.corners);
+                }
             }
         }
         self.shown = Some(view);
 
-        widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
-        if let Some((text, _)) = &self.toast {
-            widgets::toast(out, &t, f, text);
-        }
-        match self.drag {
-            Drag::Edge { start, from_left, armed, x, cy } => {
-                let travel = if from_left { x - start } else { start - x };
-                widgets::back_cue(out, &t, from_left, cy, widgets::back_cue_depth(&t, travel), armed);
+        if chrome {
+            widgets::status_bar(out, &t, f, &self.bar(clock, info), t.pal.status);
+            if let Some((text, _)) = &self.toast {
+                widgets::toast(out, &t, f, text);
             }
-            _ => {
-                if let Some((from_left, cy, s)) = self.cue {
-                    widgets::back_cue(out, &t, from_left, cy, s.at(now).0.max(0.0), false);
+            match self.drag {
+                Drag::Edge { start, from_left, armed, x, cy } => {
+                    let travel = if from_left { x - start } else { start - x };
+                    widgets::back_cue(out, &t, from_left, cy, widgets::back_cue_depth(&t, travel), armed);
+                }
+                _ => {
+                    if let Some((from_left, cy, s)) = self.cue {
+                        widgets::back_cue(out, &t, from_left, cy, s.at(now).0.max(0.0), false);
+                    }
                 }
             }
         }
+    }
+
+    /// The page under the one shown, drawn once as it stood when a swipe
+    /// from an edge began, for the swipe to bring back as it drags the page
+    /// shown towards that edge. Only reading, and a page of its own drawn by
+    /// a model of the app that nothing keeps: the pages shown do not change
+    /// for it.
+    fn capture_preview(&mut self, f: &Fonts, info: &DeviceInfo, clock: &str, now: u64) -> Option<Preview> {
+        let (screen, scroll, _) = *self.stack.get(self.stack.len().checked_sub(2)?)?;
+        let mut under = App::new(screen, self.w, self.h, self.px_per_dp);
+        under.state = self.state.clone();
+        under.corners = self.corners;
+        under.stack[0] = (screen, scroll, Focus::Unset);
+        under.settle_page();
+        // The About page's field is drawn of a clock its pages keep.
+        if screen == Screen::About {
+            under.glow = Some(GlowClock::new(under.theme().hero.glow, now));
+        }
+        let mut canvas = Canvas::new(self.w, self.h);
+        // The page under is drawn without the status bar, the message and
+        // the cue: the page shown keeps those, and the preview slides under
+        // them.
+        under.compose_page(&mut canvas, f, info, clock, now, false);
+        Some(Preview { screen, scroll, canvas })
     }
 
     /// Draw the page shown as `view` has it: all of it but the status bar,
@@ -504,7 +541,7 @@ impl App {
         let turn = self.turn.as_mut()?;
         let spring = *turn.spring.get_or_insert_with(|| {
             if turn.back {
-                Spring::new(now, -1000.0, 0.0, BACK_PERIOD)
+                Spring::new(now, turn.start as f32 - 1000.0, 0.0, BACK_PERIOD)
             } else {
                 Spring::new(now, 1000.0, -OPEN_SPEED * 1000.0, OPEN_PERIOD)
             }
@@ -651,6 +688,25 @@ impl App {
         self.toast = Some((text.to_string(), now + TOAST_MS));
         self.dirty = true;
     }
+}
+
+/// Draw a page dragged `travel` pixels towards the edge as a swipe from an
+/// edge previews going back: the page under it comes in from the left as
+/// the page shown slides right, darkens the page under and rounds the page
+/// shown's corners, exactly as the back animation does. Whichever edge the
+/// finger came from, the movement is the same way: back is always to the
+/// left.
+fn compose_prediction(out: &mut Canvas, travel: f32, under: &Canvas, corners: f32) {
+    let w = out.w as i32;
+    let along = (travel / w as f32).clamp(0.0, 1.0);
+    if along <= 0.0 || !out.whole() || !under.whole() || (under.w, under.h) != (out.w, out.h) {
+        return;
+    }
+    let front = out.crop(0, 0, out.w, out.h);
+    let at = (along * w as f32).round() as i32;
+    let shift = (BEHIND_SHIFT * w as f32 * (1.0 - along)).round() as i32;
+    let dim = BEHIND_DIM * (1.0 - along);
+    out.slide(&front, under, at, shift, dim, corners);
 }
 
 #[cfg(test)]
@@ -891,5 +947,38 @@ mod tests {
         app.compose(&mut screen, &f, &i, "12:00", 4500);
         assert!(app.morph.is_none());
         assert_eq!(top(&screen), Some(home.ceil()));
+    }
+
+    #[test]
+    fn a_swipe_from_an_edge_draws_the_page_under_it_and_dims_the_page_shown() {
+        let (f, i) = (fonts(), info());
+        // A swipe from the left edge, the page shown dragged 390 px right
+        // below the cue, which lies about the finger's height.
+        let mut app = resting(Screen::Settings, &f, &i, 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 5000);
+        app.touch(Touch::Move(400.0, 1600.0), &f, 5050);
+        let mut from_left = Canvas::new(W, H);
+        app.compose(&mut from_left, &f, &i, "12:00", 5100);
+        assert_eq!(app.preview.as_ref().map(|p| p.screen), Some(Screen::Home), "the page it goes back to");
+        // A swipe from the right edge, dragged the same distance. Back is
+        // always the same movement, to the left, so the two frames agree
+        // wherever the finger came from.
+        let mut app = resting(Screen::Settings, &f, &i, 0);
+        app.touch(Touch::Down(W as f32 - 10.0, 1600.0), &f, 5000);
+        app.touch(Touch::Move(W as f32 - 400.0, 1600.0), &f, 5050);
+        let mut from_right = Canvas::new(W, H);
+        app.compose(&mut from_right, &f, &i, "12:00", 5100);
+        for y in [800u32, 2400] {
+            for x in [300u32, 500, 700] {
+                let at = ((y * W + x) * 4) as usize;
+                assert_eq!(&from_left.data[at..at + 3], &from_right.data[at..at + 3], "both edges preview the same back movement at {x}, {y}");
+            }
+        }
+        // The page under shows on the left, the page shown slid right and
+        // rounded, and the page under darkened by the drag.
+        let mut rest = Canvas::new(W, H);
+        let mut app = resting(Screen::Settings, &f, &i, 0);
+        app.compose(&mut rest, &f, &i, "12:00", 4000);
+        assert_ne!(from_left.data, rest.data);
     }
 }

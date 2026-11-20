@@ -37,6 +37,8 @@ pub enum Icon {
     Clock,
     /// A window with a prompt cut out of it.
     Terminal,
+    /// A torch: its lamp's head and body, and the light it throws.
+    Torch,
     /// A plug: its metal end with two holes, its body and its cable.
     Usb,
     /// A flash drive: its metal end with two holes, and its body with a
@@ -221,6 +223,18 @@ const TERMINAL: &[Part] = &[
     cut(Shape::Line("M14.4,16.4H18.6", 1.9)),
 ];
 
+const TORCH: &[Part] = &[
+    // The lamp's head, wider than the body it is held by.
+    add(Shape::Fill("M11.2,6.2H16.8A1.8,1.8 0 0 1 18.6,8V11.2A1.8,1.8 0 0 1 16.8,13H11.2A1.8,1.8 0 0 1 9.4,11.2V8A1.8,1.8 0 0 1 11.2,6.2Z")),
+    // The body under it, with the switch cut into it.
+    add(Shape::Fill("M13.5,11H14.5A1.6,1.6 0 0 1 16.1,12.6V23.4A1.6,1.6 0 0 1 14.5,25H13.5A1.6,1.6 0 0 1 11.9,23.4V12.6A1.6,1.6 0 0 1 13.5,11Z")),
+    cut(Shape::Fill("M13.2,15H14.8A0.5,0.5 0 0 1 15.3,15.5V16.5A0.5,0.5 0 0 1 14.8,17H13.2A0.5,0.5 0 0 1 12.7,16.5V15.5A0.5,0.5 0 0 1 13.2,15Z")),
+    // The light it throws.
+    add(Shape::Line("M14,5.9V3.4", 1.8)),
+    add(Shape::Line("M10.3,5.7L8.6,3.9", 1.8)),
+    add(Shape::Line("M17.7,5.7L19.4,3.9", 1.8)),
+];
+
 const USB: &[Part] = &[
     add(Shape::Fill("M11.4,4.6H16.6A1.1,1.1 0 0 1 17.7,5.7V9.1A1.1,1.1 0 0 1 16.6,10.2H11.4A1.1,1.1 0 0 1 10.3,9.1V5.7A1.1,1.1 0 0 1 11.4,4.6Z")),
     cut(Shape::Fill("M12.3,6.5H13A0.4,0.4 0 0 1 13.4,6.9V7.7A0.4,0.4 0 0 1 13,8.1H12.3A0.4,0.4 0 0 1 11.9,7.7V6.9A0.4,0.4 0 0 1 12.3,6.5Z")),
@@ -359,6 +373,7 @@ fn outline(icon: Icon) -> (&'static [Part], f32) {
         Icon::Globe => (GLOBE, 1.0),
         Icon::Clock => (CLOCK, 1.0),
         Icon::Terminal => (TERMINAL, 1.0),
+        Icon::Torch => (TORCH, 1.0),
         Icon::Usb => (USB, 1.0),
         Icon::UsbDrive => (USB_DRIVE, 1.0),
         Icon::Layers => (LAYERS, 1.0),
@@ -500,7 +515,7 @@ fn path(d: &str) -> tiny_skia::Path {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 23] = [
         Icon::Install,
         Icon::Backup,
         Icon::Restore,
@@ -511,6 +526,7 @@ mod tests {
         Icon::Globe,
         Icon::Clock,
         Icon::Terminal,
+        Icon::Torch,
         Icon::Usb,
         Icon::UsbDrive,
         Icon::Layers,

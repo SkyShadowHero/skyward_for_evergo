@@ -175,6 +175,7 @@ const TIME_ZONE: Text = ["时区", "時區", "Time zone"];
 const LICENSE: Text = ["开源许可", "開放原始碼授權", "Open source licenses"];
 const FONTS: Text = ["界面字体", "介面字型", "UI fonts"];
 const DUAL_BOOT: Text = ["双系统", "雙系統", "Dual boot"];
+const TORCH: Text = ["手电筒", "手電筒", "Flashlight"];
 
 /// A canvas for a page `h` tall in the colour `bg`, holding the rows `cx`
 /// asks to be drawn.
@@ -371,11 +372,19 @@ pub fn settings(cx: &Ctx) -> Frame {
         out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
     }
     y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(["通用", "一般", "General"]));
-    let general = widgets::list(&mut c, t, f, y, &[
+    let mut general_rows = vec![
         Row::new(l.pick(LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
-    ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    ];
+    let mut general_opens = vec![Action::Open(Screen::Language), Action::Open(Screen::TimeZone)];
+    // The flashlight's row stands on a phone whose flash driver leaves a
+    // switch for it, showing whether the LED is lit.
+    if let Some(on) = s.flashlight {
+        general_rows.push(Row::new(l.pick(TORCH)).icon(ORANGE, Icon::Torch).trail(Trail::Switch(on)));
+        general_opens.push(Action::Toggle(Switch::Torch));
+    }
+    let general = widgets::list(&mut c, t, f, y, &general_rows);
+    out.extend(hits(&general.rows, &general_opens));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(["文件传输", "檔案傳輸", "File transfer"])).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
@@ -631,6 +640,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     y = widgets::info_card(&mut c, t, f, y + gap, &[
         (l.pick(["Recovery 版本", "Recovery 版本", "Recovery version"]), format!("Skyward {VERSION}")),
         (l.pick(["内核版本", "核心版本", "Kernel version"]), i.kernel.clone()),
+        (l.pick(["维护者", "維護者", "Maintainer"]), "天影大侠 (SkyShadowHero)".to_string()),
     ]);
 
     let mut boot = Vec::new();

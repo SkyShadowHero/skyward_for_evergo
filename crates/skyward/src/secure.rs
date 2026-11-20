@@ -75,6 +75,8 @@ const DIRECTORY_OFF: &str = "hwservicemanager.disabled";
 /// as the framework's description of what it offers.
 const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
 
+
+
 /// What the directory for the phone's hardware services of the older kind
 /// needs before it will run inside a recovery. The program is the installed
 /// system's own: it is built to run before any partition is mounted, so it
@@ -145,10 +147,20 @@ fn describe_hardware(wanted: &[String]) -> Result<String> {
         let (package, rest) = name
             .split_once('@')
             .with_context(|| format!("{name} does not read as a hardware service's name"))?;
+        let (version, rest) = rest
+            .split_once("::")
+            .with_context(|| format!("{name} names no interface"))?;
+        let (interface, instance) = rest
+            .split_once('/')
+            .with_context(|| format!("{name} names no instance"))?;
         out.push_str("    <hal format=\"hidl\">\n");
         out.push_str(&format!("        <name>{package}</name>\n"));
         out.push_str("        <transport>hwbinder</transport>\n");
-        out.push_str(&format!("        <fqname>@{rest}</fqname>\n"));
+        out.push_str(&format!("        <version>{version}</version>\n"));
+        out.push_str("        <interface>\n");
+        out.push_str(&format!("            <name>{interface}</name>\n"));
+        out.push_str(&format!("            <instance>{instance}</instance>\n"));
+        out.push_str("        </interface>\n");
         out.push_str("    </hal>\n");
     }
     out.push_str("</manifest>\n");

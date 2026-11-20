@@ -158,6 +158,9 @@ pub struct State {
     /// The WLAN, as the runtime last told it; none on a phone whose WLAN the
     /// recovery does not bring up.
     pub wlan: Option<Wlan>,
+    /// The flashlight, whether it is lit; none on a phone whose flash driver
+    /// leaves no switch for it.
+    pub flashlight: Option<bool>,
     /// The network the password page is for, and what is typed there.
     pub joining: Option<Network>,
     /// The network the details page is of, as it was found.
@@ -254,6 +257,7 @@ impl Default for State {
             part_work: None,
             update: Standing::None,
             wlan: None,
+            flashlight: None,
             joining: None,
             details: None,
             adding: None,

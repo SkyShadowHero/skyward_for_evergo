@@ -1,6 +1,6 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha512};
 use std::fs;
 use std::path::Path;
@@ -24,6 +24,16 @@ const FN_ENCRYPTED_KEY: &str = "encrypted_key";
 const FN_KEY_BLOB: &str = "keymaster_key_blob";
 const FN_SECDISCARDABLE: &str = "secdiscardable";
 const FN_STRETCHING: &str = "stretching";
+
+/// The bytes keystore2's compatibility layer puts in front of a key the
+/// hardware key service made. The service itself does not know them, so
+/// they come off before the blob is given to it.
+const HW_BLOB_PREFIX: &[u8] = b"pKMblob\0";
+
+/// The same, for a key a software key service made: this build has no
+/// software key service, and the bytes after the prefix are not the
+/// hardware format.
+const SW_BLOB_PREFIX: &[u8] = b"pKMblob\x01";
 
 /// SHA-512 of `data` behind a fixed prefix.
 pub fn hash_with_prefix(prefix: &[u8], data: &[u8]) -> Vec<u8> {
@@ -53,6 +63,18 @@ pub trait Decryptor {
     fn gcm_decrypt(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], body: &[u8]) -> Result<Vec<u8>>;
 }
 
+/// The blob as the key service knows it. keystore2 keeps the hardware
+/// key service's blobs behind a prefix of its own; the service reads the
+/// bytes after it.
+pub fn hardware_blob(blob: Vec<u8>) -> Result<Vec<u8>> {
+    if let Some(rest) = blob.strip_prefix(HW_BLOB_PREFIX) {
+        ensure!(!rest.is_empty(), "the key blob is only its prefix");
+        return Ok(rest.to_vec());
+    }
+    ensure!(!blob.starts_with(SW_BLOB_PREFIX), "the key was made by a software key service, which this build does not run");
+    Ok(blob)
+}
+
 /// One wrapped key as Android leaves it on disk.
 pub struct StoredKey {
     encrypted: Vec<u8>,
@@ -69,15 +91,22 @@ impl StoredKey {
         if version.trim() != VERSION {
             bail!("{} is written in layout {}, Skyward reads layout {VERSION}", dir.display(), version.trim());
         }
-        if dir.join(FN_STRETCHING).exists() {
-            bail!("{} was written by an Android too old for Skyward to read", dir.display());
+        // A directory written by an Android that stretched the key says so
+        // here. The metadata key's says "nopassword": the key is wrapped by
+        // the key service alone, and there is no password to stretch. A
+        // stretched password this build does not undo is refused.
+        if let Ok(stretching) = fs::read_to_string(dir.join(FN_STRETCHING)) {
+            let stretching = stretching.trim();
+            if !stretching.is_empty() && stretching != "nopassword" {
+                bail!("{} was written by an Android too old for Skyward to read", dir.display());
+            }
         }
         let secdiscardable_hash = match dir.join(FN_SECDISCARDABLE).exists() {
             true => hash_with_prefix(SECDISCARDABLE_PREFIX, &read(FN_SECDISCARDABLE)?),
             false => Vec::new(),
         };
         let key_blob = match dir.join(FN_KEY_BLOB).exists() {
-            true => Some(read(FN_KEY_BLOB)?),
+            true => Some(hardware_blob(read(FN_KEY_BLOB)?)?),
             false => None,
         };
         Ok(StoredKey { encrypted: read(FN_ENCRYPTED_KEY)?, key_blob, secdiscardable_hash })
@@ -94,7 +123,7 @@ impl StoredKey {
 
     /// What the phone's key service says the wrapping key may be used for.
     #[cfg(target_os = "android")]
-    pub fn authorizations(&self, service: &crate::keymint::KeyMint) -> Result<Vec<(i32, i64)>> {
+    pub fn authorizations(&self, service: &crate::Service<'_>) -> Result<Vec<(i32, i64)>> {
         let blob = self.key_blob.as_ref().context("this key is wrapped by a secret, not by the key service")?;
         service.authorizations(blob, &self.app_id(&[]))
     }
@@ -259,3 +288,4 @@ mod tests {
         dir
     }
 }
+

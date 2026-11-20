@@ -68,6 +68,16 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
+        /// The partition name the footer is made for: recovery on phones
+        /// with one, boot on phones that start recovery from boot.
+        #[arg(long, default_value = "recovery")]
+        partition: String,
+        /// A file to add to the ramdisk, as `<path in ramdisk>=<host file>`;
+        /// given more than once for several. A driver's firmware goes here
+        /// when the recovery cannot mount the partition it is on early
+        /// enough for the driver to find it.
+        #[arg(long = "add", value_name = "PATH=FILE")]
+        add: Vec<String>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -117,7 +127,8 @@ fn main() -> Result<()> {
         }
         Cmd::Repack { image, out } => {
             let mut img = BootImage::read(&image)?;
-            img.ramdisk = Ramdisk::decode(&img.ramdisk)?.encode()?;
+            let rd = Ramdisk::decode(&img.ramdisk)?;
+            img.replace_ramdisk(&rd)?;
             write(&out, &img, &img.to_bytes()?)
         }
         Cmd::Boot { kernel, ramdisk, out } => {
@@ -125,7 +136,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, partition, add, out } => {
             let size = partition_size(&stock)?;
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
@@ -149,6 +160,15 @@ fn main() -> Result<()> {
             rd.add(paths::FONT, 0o644, read(&font)?)?;
             rd.add(paths::MONO, 0o644, read(&mono)?)?;
             rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
+            for file in &add {
+                let (name, from) = file
+                    .split_once('=')
+                    .with_context(|| format!("{file} is not written as <path in ramdisk>=<host file>"))?;
+                ensure!(name.starts_with('/') || !name.is_empty(), "{file} names no path in the ramdisk");
+                ensure!(!from.is_empty(), "{file} names no host file");
+                let name = name.trim_start_matches('/');
+                rd.add(name, 0o644, std::fs::read(from).with_context(|| format!("read {from}"))?)?;
+            }
             // A stock ramdisk may run logd without any scheduling profiles,
             // and logd stops as soon as it cannot find the one it asks for.
             if rd.find(paths::TASK_PROFILES).is_none() {
@@ -168,9 +188,9 @@ fn main() -> Result<()> {
             let mut props = without(stock_props, &BUILD_VERSION);
             props.extend_from_slice(b"\nro.secure=0\nro.adb.secure=0\nro.debuggable=1\nro.ota.allow_downgrade=true\n");
             rd.replace(paths::PROP_DEFAULT, props)?;
-            img.ramdisk = rd.encode()?;
+            img.replace_ramdisk(&rd)?;
             let bytes = img.to_bytes()?;
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+            write(&out, &img, &avb::footed(&bytes, &partition, size, &Sha256::digest(&bytes))?)
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
@@ -231,7 +251,7 @@ fn partition_size(stock: &Path) -> Result<usize> {
     }
     ensure!(
         &magic == b"AVBf",
-        "{} does not end in an AVB footer; give the whole recovery partition, as the phone or a full update package holds it",
+        "{} does not end in an AVB footer; give the whole partition, as the phone or a full update package holds it",
         stock.display()
     );
     Ok(usize::try_from(size)?)
@@ -244,7 +264,8 @@ fn partition_size(stock: &Path) -> Result<usize> {
 /// build is running, and keys the installed system made are refused when
 /// they say the wrong one, so they are left out here for the recovery to
 /// fill in from the installed system once it has that mounted.
-const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
+const BUILD_VERSION: [&str; 5] =
+    ["ro.build.version.release", "ro.build.version.release_or_codename", "ro.build.version.sdk", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
 /// The scheduling profiles a recovery's programs look up by name. A
 /// recovery's cgroup setup mounts no controllers, so of all a system's
@@ -283,13 +304,7 @@ fn write(out: &Path, img: &BootImage, bytes: &[u8]) -> Result<()> {
 fn list(image: &Path) -> Result<()> {
     let img = BootImage::read(image)?;
     let h = &img.header;
-    println!(
-        "header v{}  kernel {} bytes  ramdisk {} bytes  {:?}",
-        h.header_version(),
-        img.kernel.len(),
-        img.ramdisk.len(),
-        h.osversionpatch
-    );
+    println!("header v{}  kernel {} bytes  ramdisk {} bytes", h.header_version(), img.kernel.len(), img.ramdisk.len());
     if img.ramdisk.is_empty() {
         return Ok(());
     }
@@ -313,7 +328,7 @@ ro.vendor.build.security_patch=2026-10-01\nro.vendor.build.security_patch_level=
         let text = String::from_utf8(out).expect("property files are text");
         assert!(!text.contains("ro.build.version.release=13"));
         assert!(!text.contains("ro.vendor.build.security_patch=2026-10-01"), "the vendor partition's patch level is left out too");
-        assert!(text.contains("ro.build.version.release_or_codename=13"), "a longer name is left alone");
+        assert!(!text.contains("ro.build.version.release_or_codename=13"), "the codename is left out too");
         assert!(text.contains("ro.vendor.build.security_patch_level=1"), "a longer name is left alone");
         assert!(text.contains("ro.build.id=TQ") && text.contains("ro.product.name=ishtar"));
     }

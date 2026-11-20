@@ -401,9 +401,26 @@ fn battery(root: &Path) -> Result<Option<Battery>> {
         voltage: parse_opt(dir.join("voltage_now"), "voltage_now")?,
         // How quickly the charger charges: 0 normally, then fast, flash,
         // turbo and super, which the stock SystemUI all counts quick.
-        quick: parse_opt::<u8>(root.with_file_name("qcom-battery").join("quick_charge_type"), "quick_charge_type")?.is_some_and(|k| (1..=4).contains(&k)),
+        // Qualcomm's battery supply has the field by itself; MediaTek's
+        // USB supply has it beside the battery, so either is read.
+        quick: quick_charge(root)?.is_some_and(|k| (1..=4).contains(&k)),
         plugged,
     }))
+}
+
+/// How quickly the charger says it charges, from whichever supply names
+/// the field: Qualcomm keeps it on its own battery supply, MediaTek on the
+/// USB supply beside the battery.
+fn quick_charge(root: &Path) -> Result<Option<u8>> {
+    if let Some(kind) = parse_opt::<u8>(root.with_file_name("qcom-battery").join("quick_charge_type"), "quick_charge_type")? {
+        return Ok(Some(kind));
+    }
+    for supply in ["usb", "battery"] {
+        if let Some(kind) = parse_opt::<u8>(root.join(supply).join("quick_charge_type"), "quick_charge_type")? {
+            return Ok(Some(kind));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether the power supply in `dir` says a charger or a computer is
@@ -478,6 +495,11 @@ mod tests {
         assert!(!battery(&supplies).unwrap().expect("a battery").quick);
         fs::write(qcom.join("quick_charge_type"), "3\n").unwrap();
         assert!(battery(&supplies).unwrap().expect("a battery").quick, "turbo charging is quick");
+        // MediaTek keeps the same field on the USB supply.
+        let mtk = supplies.join("usb");
+        fs::create_dir_all(&mtk).unwrap();
+        fs::write(mtk.join("quick_charge_type"), "1\n").unwrap();
+        assert!(battery(&supplies).unwrap().expect("a battery").quick, "a MediaTek quick charge is quick too");
     }
 
     #[test]

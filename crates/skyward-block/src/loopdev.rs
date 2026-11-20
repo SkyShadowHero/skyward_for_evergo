@@ -15,6 +15,12 @@ mod android {
 
     const GET_FREE: u32 = 0x4C82;
     const CONFIGURE: u32 = 0x4C0A;
+    /// The older way, for kernels before the one that took a whole
+    /// configuration at once: point the device at the file, then give it the
+    /// offset and the length.
+    const SET_FD: u32 = 0x4C00;
+    const SET_STATUS64: u32 = 0x4C04;
+    const CLR_FD: u32 = 0x4C01;
 
     /// The device only ever reads. It stays pointed at the file until the
     /// recovery ends, which is as long as anything mounted from it lasts.
@@ -69,9 +75,62 @@ mod android {
         config.info.size_limit = length;
         config.info.flags = READ_ONLY;
         if unsafe { libc::ioctl(device.as_raw_fd(), CONFIGURE as libc::Ioctl, &mut config) } < 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| format!("point {} at {}", path.display(), file.display()));
+            let e = std::io::Error::last_os_error();
+            // Linux before 5.8 has no LOOP_CONFIGURE. Android 11 and 12
+            // phones still run 4.14 or 4.19, where the file is pointed at
+            // the device first and its place in the file given after.
+            if !matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOTTY)) {
+                return Err(e).with_context(|| format!("point {} at {}", path.display(), file.display()));
+            }
+            configure_legacy(&device, &path, file, &backing, offset, length)?;
         }
         Ok(path)
+    }
+
+
+    /// Point `device` at `backing` and give it `offset` and `length` through
+    /// the loop driver's older two steps.
+    fn configure_legacy(device: &File, path: &Path, file: &Path, backing: &File, offset: u64, length: u64) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::ioctl(device.as_raw_fd(), SET_FD as libc::Ioctl, backing.as_raw_fd() as libc::c_ulong) } < 0 {
+            let e = std::io::Error::last_os_error();
+            // Some MediaTek kernels refuse the ioctl yet hand the same
+            // device to the reference tool, which uses the driver's own
+            // sequence; take that way when it is there.
+            if let Some(done) = by_losetup(path, file, offset, length) {
+                return done;
+            }
+            return Err(e).with_context(|| format!("point {} at {}", path.display(), file.display()));
+        }
+        let mut info: Info = unsafe { std::mem::zeroed() };
+        info.offset = offset;
+        info.size_limit = length;
+        info.flags = READ_ONLY;
+        if unsafe { libc::ioctl(device.as_raw_fd(), SET_STATUS64 as libc::Ioctl, &mut info) } < 0 {
+            let e = std::io::Error::last_os_error();
+            let _ = unsafe { libc::ioctl(device.as_raw_fd(), CLR_FD as libc::Ioctl) };
+            return Err(e).with_context(|| format!("give {} its offset and length", path.display()));
+        }
+        Ok(())
+    }
+
+
+    /// Point `path` at `file` through the recovery's own `losetup`, where the
+    /// kernel refuses the ioctl. `None` where the tool is not there; the
+    /// caller then gives the ioctl's error.
+    fn by_losetup(path: &Path, file: &Path, offset: u64, length: u64) -> Option<Result<()>> {
+        let tool = ["/system/bin/losetup", "/sbin/losetup"].into_iter().find(|p| Path::new(p).exists())?;
+        let _ = std::process::Command::new(tool).args(["-d"]).arg(path).status();
+        let done = std::process::Command::new(tool)
+            .args(["-r", "-o", &offset.to_string(), "--sizelimit", &length.to_string()])
+            .arg(path)
+            .arg(file)
+            .status();
+        Some(match done {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(anyhow::anyhow!("{tool} exited with {status}")),
+            Err(e) => Err(anyhow::Error::new(e).context(format!("run {tool}"))),
+        })
     }
 
     /// Where the kernel put the loop device it just handed out: Android
