@@ -422,6 +422,8 @@ pub enum Effect {
     /// as strong as the phone's own system plays them whatever the
     /// vibration settings say.
     Ticks,
+    /// Light the flashlight, or darken it.
+    Torch(bool),
     /// Save what the panel shows as a picture: into the gallery's
     /// screenshots in the owner's shared storage where `storage` says it is
     /// open, and otherwise held until it is, telling how it went with
@@ -687,6 +689,8 @@ const BACK_PERIOD: f32 = 0.393;
 /// left, in screen widths, darkened this much.
 const BEHIND_SHIFT: f32 = 0.25;
 const BEHIND_DIM: f32 = 0.47;
+/// How dark the page shown goes at the end of a swipe from an edge that
+/// would go back, as the page under it comes in: dimmer as the finger goes
 /// The most lines of what an install script shows that its page keeps,
 /// the latest; the log keeps them all.
 const SCRIPT_LINES: usize = 500;
@@ -1028,6 +1032,20 @@ struct Turn {
     /// of the screen's width, as a spring settling where it goes; set off
     /// on the first frame of the slide.
     spring: Option<Spring>,
+    /// Where the page in front stood when the slide began, in thousandths
+    /// of the screen's width. A swipe from an edge has already dragged it
+    /// part of the way, and the slide carries on from there.
+    start: i32,
+}
+
+/// The page under the one shown, drawn as it stood when a swipe from an
+/// edge began, for the swipe to bring it back as the page shown is dragged
+/// towards that edge: the page, how far it was scrolled, and its picture.
+struct Preview {
+    screen: Screen,
+    scroll: f32,
+    /// All of itself: the page as the panel showed it.
+    canvas: Canvas,
 }
 
 /// Whether a control is a row: as wide as the cards it lies on.
@@ -1179,6 +1197,9 @@ pub struct App {
     /// While a page slides: the page shown drawn on its own, and how it
     /// showed, to slide it again as it was while it shows the same.
     layer: Option<(View, Canvas)>,
+    /// The page under the one shown, drawn while a swipe from an edge
+    /// drags the page shown towards that edge; let go with the swipe.
+    preview: Option<Preview>,
     /// Bands of rows of the page drawn that show what has changed since,
     /// to draw again.
     stale: Vec<(u32, u32)>,
@@ -1251,6 +1272,7 @@ impl App {
             shown: None,
             turn: None,
             layer: None,
+            preview: None,
             stale: Vec::new(),
             cols: 0,
             backdrop: None,
@@ -1358,6 +1380,11 @@ impl App {
     /// deadline goes away.
     pub fn tick(&mut self, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
+        // A page drawn for a swipe from an edge is let go with the swipe:
+        // one that has ended without letting go of it keeps no picture.
+        if self.preview.is_some() && !matches!(self.drag, Drag::Edge { .. }) {
+            self.preview = None;
+        }
         // The key waiting for its partner in a screenshot, left alone long
         // enough, does what it does alone.
         if self.chord.is_some_and(|(_, at)| now >= at + CHORD_MS) {

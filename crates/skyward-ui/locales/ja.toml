@@ -612,6 +612,7 @@ file_transfer_note = "オンにすると、内部ストレージの復号後に�
 debugging = "デバッグ"
 about = "情報"
 
+flashlight = "ライト"
 [reboot]
 to = "再起動先"
 next_boot = "次回の起動"
@@ -652,6 +653,7 @@ internal_storage = "内部ストレージ"
 free_of = "空き {free} / 合計 {total}"
 total_unmounted = "合計 {total} · data パーティション未マウント"
 
+maintainer = "メンテナー"
 [decrypt]
 data_partition = "data パーティションを復号"
 reading_lock = "画面ロックの種類を読み取り中"

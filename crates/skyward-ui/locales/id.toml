@@ -612,6 +612,7 @@ file_transfer_note = "Jika aktif, komputer dapat mengelola file di penyimpanan i
 debugging = "Proses debug"
 about = "Tentang"
 
+flashlight = "Senter"
 [reboot]
 to = "Mulai ulang ke"
 next_boot = "Booting berikutnya"
@@ -652,6 +653,7 @@ internal_storage = "Penyimpanan internal"
 free_of = "{free} kosong dari {total}"
 total_unmounted = "Total {total} · partisi data tidak di-mount"
 
+maintainer = "Pengelola"
 [decrypt]
 data_partition = "Dekripsi partisi data"
 reading_lock = "Membaca kunci layar"

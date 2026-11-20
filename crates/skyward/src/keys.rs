@@ -4,7 +4,7 @@
 //! them, so no phone is told of them by hand, and a system that names them
 //! otherwise after an update is followed as it is.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use skyward_config::Service;
 use skyward_programs::naming::{self, Does};
 use skyward_programs::phone::{self, Partition, Phone, PARTITIONS};
@@ -54,8 +54,23 @@ fn read(slot: skyward_vab::Slot, libraries: Option<&Path>) -> Result<Phone> {
     let mut partitions = Vec::new();
     for name in PARTITIONS {
         let named = format!("{name}{}", slot.suffix());
-        let partition = mounted.iter().find(|m| m.partition == named).with_context(|| format!("{named} is not mounted"))?;
-        partitions.push(Partition::mounted(name, &partition.mount_point));
+        match mounted.iter().find(|m| m.partition == named) {
+            Some(partition) => {
+                // The installed system's own tree is a folder of its
+                // partition's root, as a recovery mounts it; the others are
+                // that root itself.
+                let at = match name {
+                    "system" => Path::new("/mnt/system/system"),
+                    _ => Path::new(&partition.mount_point),
+                };
+                partitions.push(Partition::mounted(name, at));
+            }
+            // Some phones keep what an odm partition would hold inside
+            // vendor, and have no odm of their own. Its scripts are read
+            // from there where it is.
+            None if name == "odm" && Path::new("/vendor/odm").is_dir() => partitions.push(Partition::mounted(name, Path::new("/vendor/odm"))),
+            None => skyward_sys::kmsg(&format!("{named} is not mounted, and the phone has no part for it"))?,
+        }
     }
     Phone::read(partitions, properties, libraries)
 }
@@ -89,6 +104,20 @@ pub fn programs(steps: &[Step]) -> Vec<Service> {
     secure::programs(steps).into_iter().map(|started| started.service.clone()).collect()
 }
 
+/// The two directories the phone's services register with, among `steps`.
+/// They are started before the recovery tells them what the phone
+/// describes, and the rest after.
+pub fn directories(steps: &[Step]) -> Vec<skyward_programs::secure::Started> {
+    secure::programs(steps)
+        .into_iter()
+        .filter(|s| {
+            let name = s.service.path.rsplit('/').next().unwrap_or(&s.service.path);
+            name == "servicemanager" || name == "hwservicemanager"
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether the recovery serves the secure element service among `steps`.
 pub fn serves_elements(steps: &[Step]) -> bool {
     steps.contains(&Step::ServeElements)
@@ -102,7 +131,12 @@ pub fn serves_elements(steps: &[Step]) -> bool {
 pub fn start(steps: &[Step]) -> Result<()> {
     for step in steps {
         match step {
-            Step::Start(program) => crate::services::start(std::slice::from_ref(program.as_ref()), None)?,
+            Step::Start(program) => {
+                if crate::services::running(&program.service.path).is_some() {
+                    continue;
+                }
+                crate::services::start(std::slice::from_ref(program.as_ref()), None)?
+            }
             Step::ServeElements => {
                 let readers = skyward_omapi::start()?;
                 skyward_sys::kmsg(&format!("{} is served, with a reader for each of {} secure elements: {}", skyward_omapi::SERVICE, readers.len(), readers.join(", ")))?;

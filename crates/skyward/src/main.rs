@@ -38,6 +38,8 @@ mod settings;
 #[cfg(target_os = "android")]
 mod systems;
 #[cfg(target_os = "android")]
+mod torch;
+#[cfg(target_os = "android")]
 mod ui;
 #[cfg(target_os = "android")]
 mod updates;
@@ -148,6 +150,16 @@ enum Cmd {
         /// Play the ticks of the screen going off instead of the click.
         #[arg(long)]
         ticks: bool,
+    },
+    /// Turn the flashlight on or off, or say whether it is on, by the switch
+    /// the phone's flash driver leaves.
+    #[cfg(target_os = "android")]
+    Torch {
+        #[arg(long, default_value = "/skyward/device.toml")]
+        config: String,
+        /// On, off, or status, which changes nothing.
+        #[arg(value_enum, default_value = "status")]
+        action: torch::TorchAction,
     },
     /// Save what the panel shows, as raw RGBA files cap-000.rgba onwards.
     #[cfg(target_os = "android")]
@@ -315,6 +327,11 @@ fn main() -> Result<()> {
             haptics::probe(&haptics, position, ticks)
         }
         #[cfg(target_os = "android")]
+        Cmd::Torch { config, action } => {
+            let flashlight = DeviceConfig::load(&config)?.flashlight.context("the configuration describes no flashlight")?;
+            torch::run(&flashlight, action)
+        }
+        #[cfg(target_os = "android")]
         Cmd::Capture { out, count, interval, card } => {
             std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
             for i in 0..count {
@@ -346,12 +363,12 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "android")]
         Cmd::Keymint { key, alias } => {
-            let binder = skyward_binder::driver::Binder::open()?;
-            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
+            let service = skyward_crypto::Service::open(&binder, &hardware)?;
             let hw = service.hardware()?;
-            println!("keymint {} version {} at security level {} by {}", hw.name, hw.version, hw.security_level, hw.author);
+            println!("key service {} version {} at security level {} by {}", hw.name, hw.version, hw.security_level, hw.author);
             if let Some(alias) = alias {
-                let held = skyward_crypto::keystore2::key_blob(Path::new(skyward_crypto::keystore2::DATABASE), &alias)?;
+                let held = skyward_crypto::keystore::hardware_blob(skyward_crypto::keystore2::key_blob(Path::new(skyward_crypto::keystore2::DATABASE), &alias)?)?;
                 println!("{alias} is a key of {} bytes", held.len());
                 for (tag, value) in service.authorizations(&held, &[])? {
                     println!("  tag {tag} = {value} ({value:#x})");
@@ -406,8 +423,8 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Data { credential, close: false } => {
             use skyward_crypto::data;
-            let binder = skyward_binder::driver::Binder::open()?;
-            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
+            let (binder, hardware) = (skyward_binder::driver::Binder::open()?, skyward_binder::driver::Binder::hardware()?);
+            let service = skyward_crypto::Service::open(&binder, &hardware)?;
             let opening = data::open_without_credential(&service)?;
             match &opening.mounted {
                 Some(mounted) => {
@@ -534,7 +551,11 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
     // there to ueventd, which looks in the recovery's firmware folders.
-    std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
+    // A kernel older than the firmware fallback's sysctl looks only in its
+    // own folders; the phone's drivers still find what is in the ramdisk.
+    if let Err(e) = std::fs::write(FIRMWARE_FALLBACK, "1") {
+        skyward_sys::kmsg(&format!("firmware fallback not set: {e}"))?;
+    }
     if let Some(firmware) = &cfg.firmware {
         mount_firmware(&firmware.partition)?;
     }
@@ -565,6 +586,13 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
         secure::prepare_hardware_directory(&hardware)?;
         skyward_sys::kmsg("the directory for the phone's hardware services can run")?;
     }
+    // The two directories must answer before the recovery tells them what
+    // the phone describes; the programs that register with them start
+    // after that, in the order the phone's own init starts them.
+    let directories = found.as_ref().map(|steps| keys::directories(steps)).unwrap_or_default();
+    if !directories.is_empty() {
+        services::start(&directories, None).context("start the phone's service directories")?;
+    }
     // A program that registers with the service directory needs the
     // directory to know the phone describes what it registers, and so does
     // the secure element service where the recovery serves it. The WLAN's
@@ -592,12 +620,44 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
     services::start(&services, libraries.as_deref())?;
+    prepare_secure_world()?;
     let steps = found.context("make out from the phone's partitions how its keys are used")?;
     for line in keys::describe(&steps) {
         skyward_sys::kmsg(&format!("for the phone's keys: {}", line.replace("\n  ", ", ")))?;
     }
     keys::start(&steps)?;
     agree_on_the_notes_key(&registering)
+}
+
+/// The folders MediaTek's secure world keeps its own files in. Its init
+/// makes them, owned by system, before the daemon starts; a recovery that
+/// leaves /data empty has to make them itself, or the secure world's
+/// daemon starts without the files it expects.
+#[cfg(target_os = "android")]
+fn prepare_secure_world() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const FOLDERS: [&str; 22] = [
+        "thh", "thh/system", "thh/tee_00", "thh/tee_01", "thh/tee_02", "thh/tee_03", "thh/tee_04",
+        "thh/tee_05", "thh/tee_06", "thh/tee_07", "thh/tee", "thh/tee/tas", "thh/tee_08",
+        "thh/tee_09", "thh/tee_0A", "thh/tee_0B", "thh/tee_0C", "thh/tee_0D", "thh/tee_0E",
+        "thh/tee_0F", "thh/ta", "thh/tee_log",
+    ];
+    if !Path::new("/vendor/bin/teei_daemon").exists() {
+        return Ok(());
+    }
+    for folder in FOLDERS {
+        let path = Path::new("/data/vendor").join(folder);
+        std::fs::create_dir_all(&path).with_context(|| format!("make {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("open {}", path.display()))?;
+        std::os::unix::fs::chown(&path, Some(1000), Some(1000)).with_context(|| format!("give {} to system:system", path.display()))?;
+    }
+    let provisioning = Path::new("/data/vendor/key_provisioning");
+    std::fs::create_dir_all(provisioning).with_context(|| format!("make {}", provisioning.display()))?;
+    std::fs::set_permissions(provisioning, std::fs::Permissions::from_mode(0o771))
+        .with_context(|| format!("open {}", provisioning.display()))?;
+    std::os::unix::fs::chown(provisioning, Some(1000), Some(1000)).with_context(|| format!("give {} to system:system", provisioning.display()))?;
+    Ok(())
 }
 
 /// How long a file handed over may take to be there once the modules are
@@ -622,7 +682,12 @@ fn hand_over(owners: &[skyward_config::Owners]) -> Result<usize> {
     for run in owners {
         let (uid, gid) = (id(&run.user)?, id(&run.group)?);
         for path in &run.paths {
-            skyward_sys::wait_file(Path::new(path), FILES_MADE).context("wait for a file the modules just loaded make")?;
+            if let Err(e) = skyward_sys::wait_file(Path::new(path), FILES_MADE) {
+                // A node the phone's kernel does not make is left alone;
+                // the programs that would open it are left to say so.
+                skyward_sys::kmsg(&format!("{path} is not there to hand over: {e:#}"))?;
+                continue;
+            }
             std::os::unix::fs::chown(path, Some(uid), Some(gid)).with_context(|| format!("give {path} to {}:{}", run.user, run.group))?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(run.mode))
                 .with_context(|| format!("give {path} the mode {:o}", run.mode))?;
@@ -716,7 +781,8 @@ fn mount_firmware(partition: &str) -> Result<()> {
 /// made under a build it does not know, and refuses them. The recovery's
 /// property files leave these out so that they can be set here instead.
 #[cfg(target_os = "android")]
-const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
+const BUILD_VERSION: [&str; 5] =
+    ["ro.build.version.release", "ro.build.version.release_or_codename", "ro.build.version.sdk", "ro.build.version.security_patch", "ro.vendor.build.security_patch"];
 
 /// Set each of [`BUILD_VERSION`] to the installed system's value. An earlier
 /// run of the recovery service may have set it already, and init sets such
@@ -725,10 +791,16 @@ const BUILD_VERSION: [&str; 3] = ["ro.build.version.release", "ro.build.version.
 fn adopt_installed_version(props: &std::collections::HashMap<String, String>) -> Result<()> {
     for name in BUILD_VERSION {
         let value = props.get(name).with_context(|| format!("the installed system says no {name}"))?;
-        if skyward_sys::prop(name).as_ref() != Some(value) {
-            skyward_sys::set_prop(name, value)?;
+        match skyward_sys::prop(name).as_ref() == Some(value) {
+            true => skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?,
+            false => match skyward_sys::set_prop(name, value) {
+                Ok(()) => skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?,
+                // A read-only property a recovery has set already cannot be
+                // changed; the key service still starts, and its keys may
+                // be renewed for the older build rather than refused.
+                Err(e) => skyward_sys::kmsg(&format!("{name} stays {} rather than the installed system's {value}: {e}", skyward_sys::prop(name).unwrap_or_default()))?,
+            },
         }
-        skyward_sys::kmsg(&format!("{name} is the installed system's {value}"))?;
     }
     Ok(())
 }
@@ -848,6 +920,9 @@ fn prepare(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<Vec<skyward_co
                 skyward_sys::kmsg(&format!("mounted {} on {} ({})", m.partition, m.mount_point.display(), m.filesystem))?;
             }
             let found = secure::libraries().and_then(|libraries| keys::found(slot, libraries.as_deref()));
+            if let Err(e) = &found {
+                skyward_sys::kmsg(&format!("the phone's keys are not read: {e:#}"))?;
+            }
             let steps = found.as_ref().ok().and_then(|found| found.steps.as_deref().ok());
             let programs = steps.map(keys::programs).unwrap_or_default();
             // Without them the screen still shows and the keys still work,

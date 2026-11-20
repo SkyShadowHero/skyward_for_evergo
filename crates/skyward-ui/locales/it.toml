@@ -622,6 +622,7 @@ file_transfer_note = "Se attivo, un computer può gestire i file nella memoria i
 debugging = "Debug"
 about = "Informazioni"
 
+flashlight = "Torcia"
 [reboot]
 to = "Riavvia in"
 next_boot = "Prossimo avvio"
@@ -662,6 +663,7 @@ internal_storage = "Memoria interna"
 free_of = "{free} liberi su {total}"
 total_unmounted = "{total} in totale · partizione data non montata"
 
+maintainer = "Manutentore"
 [decrypt]
 data_partition = "Decripta la partizione data"
 reading_lock = "Lettura del blocco schermo"

@@ -627,6 +627,7 @@ file_transfer_note = "Если включено, компьютер может �
 debugging = "Отладка"
 about = "Сведения"
 
+flashlight = "Фонарик"
 [reboot]
 to = "Перезагрузить в"
 next_boot = "Следующая загрузка"
@@ -667,6 +668,7 @@ internal_storage = "Внутренняя память"
 free_of = "Свободно {free} из {total}"
 total_unmounted = "Всего {total} · раздел data не смонтирован"
 
+maintainer = "Сопровождающий"
 [decrypt]
 data_partition = "Расшифровка раздела data"
 reading_lock = "Определение типа блокировки"

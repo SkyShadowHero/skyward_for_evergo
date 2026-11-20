@@ -119,6 +119,7 @@ pub fn rules(text: &str, known: &HashMap<String, u32>) -> Vec<Rule> {
 pub fn apply() -> anyhow::Result<usize> {
     use anyhow::Context;
     use std::path::Path;
+    mount_binderfs().context("make the binder devices the phone's services talk over")?;
     let known = accounts(&PASSWD_FILES.iter().chain(GROUP_FILES.iter()).copied().collect::<Vec<_>>());
     let mut rules = Vec::new();
     for file in RULE_FILES {
@@ -134,6 +135,50 @@ pub fn apply() -> anyhow::Result<usize> {
         }
     }
     Ok(changed)
+}
+
+/// Mount binderfs and name its three devices where the phone's own init
+/// names them. A recovery's init mounts none of it: on MediaTek phones the
+/// factory-reset init script does, and a recovery runs no such action, so
+/// without this the key service has no /dev/binder to reach.
+#[cfg(target_os = "android")]
+fn mount_binderfs() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::ffi::CString;
+    use std::path::Path;
+    if Path::new("/dev/binderfs/binder").exists() {
+        for name in ["binder", "hwbinder", "vndbinder"] {
+            let node = format!("/dev/binderfs/{name}");
+            let link = format!("/dev/{name}");
+            let _ = std::fs::set_permissions(&node, std::os::unix::fs::PermissionsExt::from_mode(0o666));
+            if !Path::new(&link).exists() {
+                let _ = std::os::unix::fs::symlink(&node, &link);
+            }
+        }
+        return Ok(());
+    }
+    std::fs::create_dir_all("/dev/binderfs").context("make /dev/binderfs")?;
+    let (src, dst, ty) = (CString::new("binder")?, CString::new("/dev/binderfs")?, CString::new("binder")?);
+    let options = CString::new("stats=global")?;
+    if unsafe { libc::mount(src.as_ptr(), dst.as_ptr(), ty.as_ptr(), 0, options.as_ptr().cast()) } != 0 {
+        // A kernel with no binderfs may still have made /dev/binder itself;
+        // that is enough, and a phone without binder has no key service.
+        if Path::new("/dev/binder").exists() {
+            return Ok(());
+        }
+        return Err(std::io::Error::last_os_error()).context("mount binderfs on /dev/binderfs");
+    }
+    for name in ["binder", "hwbinder", "vndbinder"] {
+        let node = format!("/dev/binderfs/{name}");
+        let link = format!("/dev/{name}");
+        if !Path::new(&node).exists() {
+            continue;
+        }
+        let _ = std::fs::set_permissions(&node, std::os::unix::fs::PermissionsExt::from_mode(0o666));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&node, &link).with_context(|| format!("point {link} at {node}"))?;
+    }
+    Ok(())
 }
 
 /// Every device node under `dir`, which a recovery's /dev holds few enough

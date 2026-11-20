@@ -101,7 +101,9 @@ jobs:
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
-            echo "devices=$(basename -s .toml devices/*.toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+            # A phone with no recovery partition is packed on a boot image
+            # that no OTA package carries, so it is built by hand.
+            echo "devices=$(grep -l '^\[stock\]' devices/*.toml | xargs -n1 basename -s .toml | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
           fi
 
   recovery:

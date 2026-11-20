@@ -34,6 +34,7 @@ impl App {
                 self.adjusting = false;
                 self.dirty = true;
             }
+            self.preview = None;
             self.drop_button();
             self.end_turn();
         }
@@ -242,8 +243,16 @@ impl App {
                         _ => self.settle_fold(now),
                     }
                 }
-                Drag::Edge { armed: true, .. } => fx.extend(self.back(now)),
+                Drag::Edge { armed: true, start, from_left, x, .. } => {
+                    self.preview = None;
+                    let travel = if from_left { x - start } else { start - x };
+                    // Back always moves the page to the right, whichever
+                    // edge the finger came from, as the back animation does.
+                    let along = travel / self.w as f32;
+                    fx.extend(self.back_from(now, along));
+                }
                 Drag::Edge { start, from_left, x, cy, .. } => {
+                    self.preview = None;
                     // Short of going back, the cue sinks back into the edge.
                     let travel = if from_left { x - start } else { start - x };
                     let depth = widgets::back_cue_depth(&t, travel);
@@ -287,6 +296,18 @@ impl App {
             }
         }
         fx
+    }
+
+    /// How far a finger swiping in from an edge has come, and which edge it
+    /// is (`true` for the left one), while it swipes in; nothing otherwise.
+    pub(super) fn edge_swipe(&self) -> Option<(f32, bool)> {
+        match self.drag {
+            Drag::Edge { start, from_left, x, .. } => {
+                let travel = if from_left { x - start } else { start - x };
+                Some((travel.max(0.0), from_left))
+            }
+            _ => None,
+        }
     }
 
     /// The button a finger holds down, which shows held at once: `<`, the
@@ -701,5 +722,106 @@ mod tests {
         app.touch(Touch::Move(40.0, 2100.0), &f, 32);
         app.touch(Touch::Up, &f, 40);
         assert_eq!(app.cue.as_ref().map(|c| c.1), Some(at), "it sinks back where it was");
+    }
+
+    #[test]
+    fn a_swipe_from_the_edge_previews_the_page_it_goes_back_to() {
+        let (f, i) = (fonts(), info());
+        let mut app = resting(Screen::Reboot, &f, &i, 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 4000);
+        app.touch(Touch::Move(200.0, 1605.0), &f, 4050);
+        app.compose(&mut Canvas::new(W, H), &f, &i, "12:00", 4100);
+        let preview = app.preview.as_ref().expect("the page under is drawn as the finger drags");
+        assert_eq!((preview.screen, preview.scroll), (Screen::Home, 0.0), "the page it goes back to, as it was scrolled");
+        assert_eq!(app.screen(), Screen::Reboot, "the page shown stays until the finger lifts");
+        assert_eq!(app.stack.len(), 2, "the stack is not touched");
+    }
+
+    #[test]
+    fn letting_go_past_the_threshold_goes_back_and_lets_the_preview_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = resting(Screen::Reboot, &f, &i, 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 4000);
+        app.touch(Touch::Move(400.0, 1600.0), &f, 4050);
+        app.touch(Touch::Move(420.0, 1600.0), &f, 4080);
+        app.compose(&mut Canvas::new(W, H), &f, &i, "12:00", 4100);
+        assert!(app.preview.is_some(), "dragged past the threshold, the page under shows");
+        app.touch(Touch::Up, &f, 4200);
+        assert_eq!(app.screen(), Screen::Home, "let go past the threshold, it goes back");
+        assert!(app.preview.is_none(), "the page it went back to shows as itself");
+        assert!(app.turn.is_some(), "and slides in over the page left");
+    }
+
+    #[test]
+    fn a_swipe_short_of_the_threshold_springs_back_and_lets_the_preview_go() {
+        let (f, i) = (fonts(), info());
+        let mut app = resting(Screen::Reboot, &f, &i, 0);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 4000);
+        app.touch(Touch::Move(100.0, 1600.0), &f, 4050);
+        app.compose(&mut Canvas::new(W, H), &f, &i, "12:00", 4100);
+        assert!(app.preview.is_some(), "short of the threshold, the page under still shows under the finger");
+        app.touch(Touch::Up, &f, 4200);
+        assert_eq!(app.screen(), Screen::Reboot, "short of the threshold it does not go back");
+        assert!(app.preview.is_none(), "the page under is let go");
+        assert!(app.cue.is_some(), "the cue sinks back into the edge");
+        assert_eq!(app.deadline(4200), Some(0), "the cue moves");
+        app.tick(10_000);
+        assert!(app.cue.is_none(), "sunk back, the cue is gone");
+    }
+
+    #[test]
+    fn every_page_previews_the_one_under_it_but_the_first_has_none() {
+        let (f, i) = (fonts(), info());
+        // The first page has nothing to go back to.
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 0);
+        app.touch(Touch::Move(400.0, 1600.0), &f, 16);
+        app.compose(&mut Canvas::new(W, H), &f, &i, "12:00", 32);
+        assert!(!matches!(app.drag, Drag::Edge { .. }), "no swipe");
+        assert!(app.preview.is_none());
+        // The terminal page's is the page it was opened from, terminal and
+        // all: no page is left out of the preview.
+        let mut app = resting(Screen::Advanced, &f, &i, 0);
+        tap(&mut app, &f, &i, Action::Open(Screen::Terminal));
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 4000);
+        app.compose(&mut c, &f, &i, "12:00", 7000);
+        assert_eq!(app.screen(), Screen::Terminal);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 8000);
+        app.touch(Touch::Move(400.0, 1600.0), &f, 8050);
+        app.touch(Touch::Move(420.0, 1600.0), &f, 8080);
+        app.compose(&mut c, &f, &i, "12:00", 8100);
+        let preview = app.preview.as_ref().expect("the terminal page previews the page under it too");
+        assert_eq!(preview.screen, Screen::Advanced);
+        assert_eq!(app.stack.len(), 3, "the stack is not touched");
+        app.touch(Touch::Up, &f, 8200);
+        assert_eq!(app.screen(), Screen::Advanced, "and goes back");
+        assert!(app.preview.is_none());
+        // The About page's moving field is no page to leave out either.
+        let mut app = App::new(Screen::About, W, H, PPD);
+        app.tick(0);
+        let mut c = Canvas::new(W, H);
+        app.compose(&mut c, &f, &i, "12:00", 0);
+        tap(&mut app, &f, &i, Action::Open(Screen::Logs));
+        app.compose(&mut c, &f, &i, "12:00", 4000);
+        app.compose(&mut c, &f, &i, "12:00", 7000);
+        assert_eq!(app.screen(), Screen::Logs);
+        app.touch(Touch::Down(10.0, 1600.0), &f, 8000);
+        app.touch(Touch::Move(400.0, 1600.0), &f, 8050);
+        app.compose(&mut c, &f, &i, "12:00", 8100);
+        assert_eq!(app.preview.as_ref().map(|p| p.screen), Some(Screen::About), "the About page previews as much as any");
+        // A preview only draws: an install waiting on the wrist still waits,
+        // and the swipe asks the runtime for nothing.
+        let mut app = sideloading(&f, &i);
+        app.state.vibrate = false;
+        app.compose(&mut c, &f, &i, "12:00", 1000);
+        app.compose(&mut c, &f, &i, "12:00", 4000);
+        assert_eq!(app.screen(), Screen::Installing);
+        let mut fx = app.touch(Touch::Down(10.0, 1600.0), &f, 5000);
+        fx.extend(app.touch(Touch::Move(900.0, 1600.0), &f, 5050));
+        app.compose(&mut c, &f, &i, "12:00", 5100);
+        assert_eq!(app.preview.as_ref().map(|p| p.screen), Some(Screen::Install), "the installing page previews the page it was started from");
+        assert_eq!(app.state.install, Install::Waiting, "a waiting install still waits");
+        assert!(fx.is_empty(), "previewing asks the runtime for nothing");
     }
 }

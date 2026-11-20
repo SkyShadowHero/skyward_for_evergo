@@ -622,6 +622,7 @@ file_transfer_note = "Si cette option est activée, un ordinateur peut gérer le
 debugging = "Débogage"
 about = "À propos"
 
+flashlight = "Lampe torche"
 [reboot]
 to = "Redémarrer vers"
 next_boot = "Prochain démarrage"
@@ -662,6 +663,7 @@ internal_storage = "Stockage interne"
 free_of = "{free} libres sur {total}"
 total_unmounted = "{total} au total · partition data non montée"
 
+maintainer = "Mainteneur"
 [decrypt]
 data_partition = "Déchiffrer la partition data"
 reading_lock = "Lecture du verrouillage de l’écran"

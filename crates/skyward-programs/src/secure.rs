@@ -13,6 +13,8 @@ use std::path::Path;
 /// The key service, and the packages whose services it serves besides: it
 /// is one program behind them all.
 const KEYS: &str = "android.hardware.security.keymint.IKeyMintDevice/default";
+/// The key service of the older kind, by its package and its interface.
+const KEYMASTER: (&str, &str) = ("android.hardware.keymaster", "IKeymasterDevice");
 const KEY_PACKAGES: [&str; 3] = ["android.hardware.security.keymint", "android.hardware.security.secureclock", "android.hardware.security.sharedsecret"];
 
 /// The credential service and the boot control, each by its package and
@@ -160,15 +162,69 @@ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
             start(&mut out, started(phone, program, Ready::Nothing, Vec::new()));
         }
     }
-
-    ensure!(described(phone, Kind::Aidl, KEYS).is_some(), "the phone describes no {KEYS}");
-    let keys = behind(phone, "the key service", KEYS, |file| file.contains("keymint") && !file.contains("strongbox"))?;
-    let with_keys = |d: &Described| d.instance == INSTANCE && KEY_PACKAGES.contains(&d.package.as_str());
-    start(&mut out, started(phone, keys, Ready::Service(KEYS.into()), besides(phone, keys, KEYS, with_keys)));
-
+    // The newer directory the phone's services register with is started
+    // before the hardware one, which some programs use in turn.
+    if let Some(program) = named(phone, "servicemanager")? {
+        start(&mut out, started(phone, program, Ready::Property("servicemanager.ready"), Vec::new()));
+    }
     let (credentials, credentials_kind) = offered(phone, CREDENTIALS).context("the phone describes no credential service")?;
     let (boot, boot_kind) = offered(phone, BOOT).context("the phone describes no boot control")?;
-    if credentials_kind == Kind::Hidl || boot_kind == Kind::Hidl {
+    let keys_older = described(phone, Kind::Aidl, KEYS).is_none();
+    let directory_needed = keys_older || credentials_kind == Kind::Hidl || boot_kind == Kind::Hidl;
+    // The directory for hardware services of the older kind has to run
+    // before anything that registers with it. An older key service is the
+    // first of those; a newer one registers with the other directory, and
+    // the hardware one is started after it, as it was before.
+    if keys_older && directory_needed {
+        let directory = phone
+            .programs
+            .iter()
+            .find(|p| p.name == HARDWARE_DIRECTORY && phone.carries(p))
+            .context("the phone has hardware services of the older kind, and no directory for them among the programs its scripts name")?;
+        let mut started = started(phone, directory, Ready::Property(HARDWARE_DIRECTORY_READY), Vec::new());
+        started.service.user = Some("root".into());
+        started.service.groups = vec!["root".into(), "readproc".into()];
+        start(&mut out, started);
+    }
+
+    // MediaTek's secure world is reached through its own daemon, which the
+    // phone starts before the key service. It starts once the directory it
+    // registers with is up, as the recoveries that decrypt on this platform
+    // start it on hwservicemanager.ready.
+    if let Some(daemon) = named(phone, "teei_daemon")? {
+        let mut started = started(phone, daemon, Ready::Nothing, Vec::new());
+        started.service.user = Some("root".into());
+        started.service.groups = vec!["root".into()];
+        start(&mut out, started);
+    }
+
+    if keys_older {
+        start(&mut out, credential(phone, &credentials, credentials_kind)?);
+    }
+
+    match described(phone, Kind::Aidl, KEYS) {
+        Some(_) => {
+            let keys = behind(phone, "the key service", KEYS, |file| file.contains("keymint") && !file.contains("strongbox"))?;
+            let with_keys = |d: &Described| d.instance == INSTANCE && KEY_PACKAGES.contains(&d.package.as_str());
+            start(&mut out, started(phone, keys, Ready::Service(KEYS.into()), besides(phone, keys, KEYS, with_keys)));
+        }
+        // A phone of the older kind keeps its key service behind a hardware
+        // service, and has no newer key service at all. Its interface is
+        // found the same way the credential service's is.
+        None => {
+            let (name, kind) = offered(phone, KEYMASTER).with_context(|| format!("the phone describes no {KEYS}"))?;
+            ensure!(kind == Kind::Hidl, "the phone describes {name} as a service of the newer kind, which is not the key service this build asks for");
+            let keys = behind(phone, "the key service", &name, |file| file.contains("keymaster") && !file.contains("attestation") && !file.contains("soter"))?;
+            // MediaTek's key service is started as root by the recoveries
+            // that use it, whatever its own init script says: it opens the
+            // secure world's node and registers its hardware service.
+            let mut started = started(phone, keys, Ready::HardwareService(name), Vec::new());
+            started.service.user = Some("root".into());
+            started.service.groups = vec!["root".into(), "drmrpc".into()];
+            start(&mut out, started);
+        }
+    }
+    if !keys_older && directory_needed {
         let directory = phone
             .programs
             .iter()
@@ -176,14 +232,14 @@ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
             .context("the phone has hardware services of the older kind, and no directory for them among the programs its scripts name")?;
         start(&mut out, started(phone, directory, Ready::Property(HARDWARE_DIRECTORY_READY), Vec::new()));
     }
+    if !keys_older {
+        start(&mut out, credential(phone, &credentials, credentials_kind)?);
+    }
     let ready = |name: String, kind: Kind| match kind {
         Kind::Aidl => Ready::Service(name),
         Kind::Hidl => Ready::HardwareService(name),
     };
     let alone = |_: &Described| false;
-    let program = behind(phone, "the credential service", &credentials, |file| file.contains("gatekeeper"))?;
-    let registers = besides(phone, program, &credentials, alone);
-    start(&mut out, started(phone, program, ready(credentials, credentials_kind), registers));
 
     if described(phone, Kind::Aidl, WEAVER).is_some() {
         out.extend(weaver(phone)?);
@@ -231,6 +287,19 @@ pub fn programs(steps: &[Step]) -> Vec<&Started> {
             Step::ServeElements => None,
         })
         .collect()
+}
+
+/// The credential service as the phone starts it, ready when it is
+/// registered.
+fn credential(phone: &Phone, name: &str, kind: Kind) -> Result<Started> {
+    let alone = |_: &Described| false;
+    let program = behind(phone, "the credential service", name, |file| file.contains("gatekeeper"))?;
+    let registers = besides(phone, program, name, alone);
+    let ready = match kind {
+        Kind::Aidl => Ready::Service(name.into()),
+        Kind::Hidl => Ready::HardwareService(name.into()),
+    };
+    Ok(started(phone, program, ready, registers))
 }
 
 /// What starting the weaver takes: what it reaches its secure element

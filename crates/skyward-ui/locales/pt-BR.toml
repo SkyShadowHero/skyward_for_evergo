@@ -622,6 +622,7 @@ file_transfer_note = "Quando ativada, um computador pode gerenciar os arquivos d
 debugging = "Depuração"
 about = "Sobre"
 
+flashlight = "Lanterna"
 [reboot]
 to = "Reiniciar em"
 next_boot = "Próxima inicialização"
@@ -662,6 +663,7 @@ internal_storage = "Armazenamento interno"
 free_of = "{free} livres de {total}"
 total_unmounted = "{total} no total · partição data não montada"
 
+maintainer = "Mantenedor"
 [decrypt]
 data_partition = "Descriptografar a partição data"
 reading_lock = "Lendo o bloqueio de tela"

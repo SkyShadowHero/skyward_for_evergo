@@ -617,6 +617,7 @@ file_transfer_note = "Wenn aktiviert, kann ein Computer die Dateien im internen 
 debugging = "Debugging"
 about = "Info"
 
+flashlight = "Taschenlampe"
 [reboot]
 to = "Neustart in"
 next_boot = "Nächster Start"
@@ -657,6 +658,7 @@ internal_storage = "Interner Speicher"
 free_of = "{free} frei von {total}"
 total_unmounted = "{total} gesamt · data-Partition nicht eingehängt"
 
+maintainer = "Betreuer"
 [decrypt]
 data_partition = "data-Partition entschlüsseln"
 reading_lock = "Displaysperre wird gelesen"

@@ -627,6 +627,7 @@ file_transfer_note = "Gdy włączone, komputer może zarządzać plikami w pami�
 debugging = "Debugowanie"
 about = "Informacje"
 
+flashlight = "Latarka"
 [reboot]
 to = "Restart do"
 next_boot = "Następne uruchomienie"
@@ -667,6 +668,7 @@ internal_storage = "Pamięć wewnętrzna"
 free_of = "Wolne {free} z {total}"
 total_unmounted = "Łącznie {total} · partycja data niezamontowana"
 
+maintainer = "Opiekun"
 [decrypt]
 data_partition = "Odszyfruj partycję data"
 reading_lock = "Odczytywanie blokady ekranu"

@@ -612,6 +612,7 @@ file_transfer_note = "开启后，可在电脑上管理内部存储中的文件�
 debugging = "调试"
 about = "关于"
 
+flashlight = "手电筒"
 [reboot]
 to = "重启到"
 next_boot = "下次启动"
@@ -652,6 +653,7 @@ internal_storage = "机身存储"
 free_of = "可用存储 {free} / 总存储 {total}"
 total_unmounted = "总存储 {total} · data 分区未挂载"
 
+maintainer = "维护者"
 [decrypt]
 data_partition = "解密 data 分区"
 reading_lock = "正在读取锁屏方式"

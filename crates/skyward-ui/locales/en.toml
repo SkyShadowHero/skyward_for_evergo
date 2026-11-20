@@ -698,6 +698,7 @@ debugging = "Debugging"
 about = "About"
 
 # Where the phone can restart to.
+flashlight = "Flashlight"
 [reboot]
 to = "Reboot to"
 next_boot = "Next boot"
@@ -741,6 +742,7 @@ internal_storage = "Internal storage"
 free_of = "{free} free of {total}"
 total_unmounted = "{total} in all · data partition not mounted"
 
+maintainer = "Maintainer"
 [decrypt]
 data_partition = "Decrypt the data partition"
 reading_lock = "Reading the screen lock"

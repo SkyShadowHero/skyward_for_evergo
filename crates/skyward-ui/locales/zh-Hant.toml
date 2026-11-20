@@ -612,6 +612,7 @@ file_transfer_note = "開啟後，可在電腦上管理內部儲存空間中的�
 debugging = "偵錯"
 about = "關於"
 
+flashlight = "手電筒"
 [reboot]
 to = "重新啟動到"
 next_boot = "下次啟動"
@@ -652,6 +653,7 @@ internal_storage = "內建儲存空間"
 free_of = "可用空間 {free} / 總容量 {total}"
 total_unmounted = "總容量 {total} · data 分割區未掛載"
 
+maintainer = "維護者"
 [decrypt]
 data_partition = "解密 data 分割區"
 reading_lock = "正在讀取螢幕鎖定方式"

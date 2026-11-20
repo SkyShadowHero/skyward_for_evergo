@@ -4,6 +4,9 @@ use anyhow::{bail, Context, Result};
 /// on it: it tells apart the copies of libbinder a phone carries, and the one
 /// the recovery's own programs are built from is the recovery copy.
 const HEADER: i32 = i32::from_be_bytes(*b"RECO");
+/// The mark of the installed system's libbinder, which the directory every
+/// program registers with is built as.
+const HEADER_SYSTEM: i32 = i32::from_be_bytes(*b"SYST");
 
 /// Strict mode gathers violations rather than acting on them; a caller with
 /// no policy of its own still sets that bit.
@@ -73,10 +76,21 @@ impl Parcel {
     /// A call to `interface`, opened with the header libbinder reads before
     /// it looks at anything the method itself takes.
     pub fn call(interface: &str) -> Parcel {
+        Self::call_with(interface, HEADER)
+    }
+
+    /// A call to a program of the installed system, whose libbinder is the
+    /// system's rather than the recovery's: the mark says which copy of
+    /// libbinder the far side is built from.
+    pub fn call_system(interface: &str) -> Parcel {
+        Self::call_with(interface, HEADER_SYSTEM)
+    }
+
+    fn call_with(interface: &str, header: i32) -> Parcel {
         let mut p = Parcel::default();
         p.i32(STRICT_MODE_PENALTY_GATHER);
         p.i32(UNSET_WORK_SOURCE);
-        p.i32(HEADER);
+        p.i32(header);
         p.string(interface);
         p
     }
@@ -155,6 +169,16 @@ impl Parcel {
             self.data.extend_from_slice(&u.to_le_bytes());
         }
         self.data.extend_from_slice(&0u16.to_le_bytes());
+        self.pad();
+    }
+
+    /// Text written as AIDL's `@utf8InCpp` names it: the count of its
+    /// bytes, those bytes, a terminator, and padding to the next four.
+    pub fn utf8(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        self.i32(bytes.len() as i32);
+        self.data.extend_from_slice(bytes);
+        self.data.push(0);
         self.pad();
     }
 
@@ -254,6 +278,17 @@ impl<'a> Reader<'a> {
         self.i32().context("read the caller's work source")?;
         self.i32().context("read the mark of the caller's libbinder")?;
         self.string().context("read the interface called")
+    }
+
+    /// Text written as AIDL's `@utf8InCpp` names it.
+    pub fn utf8(&mut self) -> Result<String> {
+        let bytes = self.i32()?;
+        if bytes < 0 {
+            bail!("text of length {bytes} was read where some was expected");
+        }
+        let raw = self.take(bytes as usize + 1)?;
+        self.skip_padding();
+        Ok(String::from_utf8_lossy(&raw[..bytes as usize]).into_owned())
     }
 
     pub fn string(&mut self) -> Result<String> {

@@ -48,6 +48,14 @@ impl App {
                 self.refresh();
                 return vec![Effect::Wlan(on)];
             }
+            // The switch moves at once; the runtime then lights the LED or
+            // darkens it, and the switch shows what the phone says by then.
+            Action::Toggle(Switch::Torch) => {
+                let on = !self.state.flashlight.expect("the flashlight switch shows on a phone whose driver leaves one");
+                self.state.flashlight = Some(on);
+                self.refresh();
+                return vec![Effect::Torch(on)];
+            }
             Action::Toggle(switch) => {
                 let on = match switch {
                     Switch::Vibrate => &mut self.state.vibrate,
@@ -58,6 +66,7 @@ impl App {
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
+                    Switch::Torch => unreachable!("the flashlight switch is turned above"),
                 };
                 *on = !*on;
                 let now_on = *on;

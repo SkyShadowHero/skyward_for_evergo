@@ -101,6 +101,16 @@ pub(super) fn opened(screen: Screen, f: &Fonts, i: &DeviceInfo) -> App {
     app
 }
 
+/// `screen` opened from the home page and drawn, its slide in over the
+/// home page come to rest: a page a finger can be dragged from at `now`.
+pub(super) fn resting(screen: Screen, f: &Fonts, i: &DeviceInfo, now: u64) -> App {
+    let mut app = opened(screen, f, i);
+    let mut c = Canvas::new(W, H);
+    app.compose(&mut c, f, i, "12:00", now);
+    app.compose(&mut c, f, i, "12:00", now + 3000);
+    app
+}
+
 /// A battery at `level`, as `charge` has it, 35.2 °C, on a charger
 /// unless it discharges.
 pub(super) fn battery_at(level: u8, charge: Charge) -> skyward_info::Battery {

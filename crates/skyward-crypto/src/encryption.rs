@@ -26,9 +26,21 @@ pub struct Encryption {
 }
 
 impl Encryption {
-    /// Read what an entry of the phone's own table says.
+    /// Read what an entry of the phone's own table says. Some MediaTek
+    /// tables leave the cipher out and give only the directory the key is
+    /// in; a key blob there is the hardware-wrapped key Android encrypts
+    /// the whole partition with, by the cipher Android uses for one.
     pub fn of(entry: &Entry) -> Result<Encryption> {
-        let said = entry.extra("metadata_encryption").context("the phone says its data partition is not encrypted whole")?;
+        let said = match entry.extra("metadata_encryption") {
+            Some(said) => said,
+            None => {
+                let key = key_dir(entry)?;
+                if !key.join("keymaster_key_blob").exists() {
+                    anyhow::bail!("the phone says its data partition is not encrypted whole");
+                }
+                "aes-256-xts"
+            }
+        };
         let (name, rest) = said.split_once(':').unwrap_or((said, ""));
         let cipher = CIPHERS
             .iter()

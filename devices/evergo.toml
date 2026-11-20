@@ -1,0 +1,158 @@
+[device]
+codename = "evergo"
+brand = "Redmi"
+model = "Redmi Note 11 5G"
+ab = true
+soc = { hans = "联发科天玑810", hant = "聯發科天璣810", en = "MediaTek Dimensity 810" }
+# HyperOS keeps its own build name here; the vendor build names the older
+# boot image, not the system installed beside it.
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+width = 1080
+height = 2400
+density = 440
+diagonal = 6.5
+# rounded_corner_radius in the system's display overlay.
+corner_radius = 80
+
+# The phone starts recovery from its boot partition: it has no recovery
+# partition, and the boot ramdisk already carries Android's recovery. The
+# touchscreen driver is built into the kernel; its firmware is added to the
+# ramdisk by the packer, since the recovery cannot mount vendor before the
+# driver probes.
+[modules]
+sources = ["vendor_boot", "vendor_dlkm", "vendor"]
+# The connectivity chip's drivers, which the phone's own init loads as it
+# boots: the front-end module's, then the WMT driver the WiFi and Bluetooth
+# parts of the MT6631 are driven over. The two programs that power the chip
+# on and give it its ROM patch start after them, as the phone's init starts
+# them (see the services below).
+load = ["connfem", "wmt_drv"]
+
+# The partitions a backup of the baseband and EFS takes: MediaTek's NV
+# partitions, the protected calibration and the sensor calibration.
+[backup]
+efs = ["nvdata", "nvcfg", "protect1", "protect2", "persist"]
+data_skipped = ["vendor/tzstorage", "vendor/qtee", "vendor/mitee", "vendor/goodix"]
+
+# Where the phone's own programs keep logs in the data partition.
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]
+
+# The nodes MediaTek's secure world and its key service open, given the
+# owners the phone's own init gives them before it starts those programs.
+[[owners]]
+user = "system"
+group = "system"
+mode = 0o660
+paths = ["/dev/teei_client", "/dev/teei_config", "/dev/tz_vfs", "/dev/teei_fp"]
+
+[[owners]]
+user = "system"
+group = "drmrpc"
+mode = 0o660
+paths = ["/dev/ut_keymaster"]
+
+[[owners]]
+user = "system"
+group = "drmrpc"
+mode = 0o666
+paths = ["/dev/isee_tee0"]
+
+# The connectivity chip's own two programs: the WMT loader powers the
+# MT6631 on over the WMT driver's nodes, and the launcher stays for the ROM
+# patch the chip's radios (WiFi, Bluetooth, GPS and FM) are given from the
+# vendor partition's firmware folder. The loader runs once; a second start
+# after the chip is already up is allowed to fail, since the launcher and
+# the chip are what matter by then.
+[[service]]
+path = "/vendor/bin/wmt_loader"
+oneshot = true
+
+[[service]]
+path = "/vendor/bin/wmt_launcher"
+args = ["-p", "/vendor/firmware/", "-o", "1"]
+
+# The fuel gauge's own program, MediaTek's GM3.0 fuelgauged: the gauge's
+# driver in this kernel runs its algorithm once as the phone boots and then
+# leaves the level of charge, the coulomb count and the cycle count to this
+# program, which reads the gauge's profile and calibration out of the
+# driver over its daemon interface and hands the state of charge it works
+# out back to the kernel. None of the phone's own init runs in a recovery,
+# so without it those readings stop where the boot left them: the level
+# stays at one number while the voltage and the current the meter reads
+# keep coming, and the charge counter and the cycle count never move.
+#
+# The program is built for the phone's 32-bit ABI and names
+# /system/bin/linker as its loader, which this recovery's own system, being
+# the installed system's 64-bit one, does not carry. The installed system's
+# com.android.runtime bundle does, with the bionic libraries of that ABI,
+# and the recovery already opens that bundle on /apex for the loader its
+# hardware services ask for, before it starts the programs here. The
+# installed system's other 32-bit libraries are mounted under
+# /mnt/system/system beside it, and the vendor partition's own (the gauge
+# library fuelgauged loads, and the driver library that one links) under
+# /vendor/lib. It runs as the phone's own init runs it: as root, in the
+# root and system groups.
+[[service]]
+path = "/apex/com.android.runtime/bin/linker"
+args = ["/vendor/bin/fuelgauged"]
+libraries = ["/apex/com.android.runtime/lib/bionic", "/mnt/system/system/lib", "/vendor/lib"]
+user = "root"
+groups = ["root", "system"]
+
+# WLAN: MediaTek's MT6631 connectivity chip, whose WiFi side is the gen4m
+# driver over the WMT driver. The driver makes no interface as it loads: it
+# makes wlan0 when the chip is asked for WiFi power over the character
+# device, which the phone's own WiFi HAL writes as the WiFi is turned on.
+# The modules load in the phone's own order, the character device first and
+# then the driver built on it, both after the WMT driver this phone's init
+# loads at boot. The kernel's firmware loader looks for the chip's firmware
+# in /vendor/firmware, where this phone's boot command line points it, so
+# none is placed for it here. wpa_supplicant runs on the installed system's
+# libraries before the vendor partition's, because the phone's own build of
+# it is linked against libbinder_ndk and libnl from the vendor interface,
+# which the recovery's own system does not carry. The chip's own NVRAM
+# assistant is not started: it takes the phone's WiFi address and its
+# calibration from the nvdata partition, which a recovery does not mount,
+# so the address the interface comes up with is the driver's own rather
+# than the phone's; scanning works without it.
+[wlan]
+modules = ["wmt_chrdev_wifi", "wlan_drv_gen4m"]
+writes = [{ path = "/dev/wmtWifi", value = "1" }]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/mnt/system/system/lib64", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
+# The phone's own table mounts persist before its secure world starts; the
+# key service expects its files where it left them.
+[partitions]
+mounted = ["persist"]
+
+# The vibration motor, played through the kernel's force-feedback events:
+# the phone's own Awinic AW86927 LRA driver, "awinic_haptic" (i2c 9-005a),
+# keeps the click waveform 0 and the tick waveform 2 the phone's own system
+# plays, and gives the motor's resonant frequency in tenths of a hertz in
+# f0 (1739, so 173.9 Hz).
+[haptics]
+click = 0
+resonance = "/sys/devices/platform/11d01000.i2c9/i2c-9/9-005a/f0"
+strength = { lightest = 0.25, strongest = 0.75 }
+
+# The flashlight: the phone's MT6360 flash driver puts the torch's switch
+# under its platform device, 1 lit and 0 dark. The two LEDs' own
+# torch_brightness files under /sys/class/flashlight are brightness steps
+# for the camera's flash, not switches: writing them lights nothing.
+[flashlight]
+path = "/sys/devices/platform/flashlights_mt6360/torch_brightness"

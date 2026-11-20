@@ -627,6 +627,7 @@ file_transfer_note = "Коли ввімкнено, комп’ютер може 
 debugging = "Налагодження"
 about = "Відомості"
 
+flashlight = "Ліхтар"
 [reboot]
 to = "Перезапустити в"
 next_boot = "Наступний запуск"
@@ -667,6 +668,7 @@ internal_storage = "Внутрішня пам’ять"
 free_of = "Вільно {free} з {total}"
 total_unmounted = "Усього {total} · розділ data не змонтовано"
 
+maintainer = "Супроводжувач"
 [decrypt]
 data_partition = "Розшифрувати розділ data"
 reading_lock = "Визначення типу блокування екрана"

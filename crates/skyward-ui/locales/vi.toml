@@ -617,6 +617,7 @@ file_transfer_note = "Khi bật, máy tính có thể quản lý các tệp tron
 debugging = "Gỡ lỗi"
 about = "Giới thiệu"
 
+flashlight = "Đèn pin"
 [reboot]
 to = "Khởi động lại vào"
 next_boot = "Lần khởi động tới"
@@ -657,6 +658,7 @@ internal_storage = "Bộ nhớ trong"
 free_of = "Còn trống {free} trên tổng {total}"
 total_unmounted = "Tổng {total} · phân vùng data chưa gắn kết"
 
+maintainer = "Người bảo trì"
 [decrypt]
 data_partition = "Giải mã phân vùng data"
 reading_lock = "Đang đọc kiểu khóa màn hình"

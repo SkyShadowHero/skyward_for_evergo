@@ -617,6 +617,7 @@ file_transfer_note = "Açıkken, şifresi çözüldükten sonra dahili depolamad
 debugging = "Hata ayıklama"
 about = "Hakkında"
 
+flashlight = "El feneri"
 [reboot]
 to = "Hedef"
 next_boot = "Sonraki açılış"
@@ -657,6 +658,7 @@ internal_storage = "Dahili depolama"
 free_of = "{free} boş, toplam {total}"
 total_unmounted = "Toplam {total} · data bölümü bağlı değil"
 
+maintainer = "Bakımcı"
 [decrypt]
 data_partition = "data bölümünün şifresini çöz"
 reading_lock = "Ekran kilidi okunuyor"

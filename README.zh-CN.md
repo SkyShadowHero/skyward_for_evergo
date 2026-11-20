@@ -114,6 +114,9 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 | 🚧 REDMI K90 Ultra | `warsaw` | OS3.0.309.0.WHPCNXM（Android 16） |
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM（Android 17） |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM（Android 17） |
+| 🚧 红米 Note 11 5G | `evergo` | V816.0.1.0.TGBCNXM（Android 12），boot 分区 |
+
+红米 Note 11 5G 没有 recovery 分区：原厂 boot 镜像里就带着 Android 的 recovery，刷到 boot 分区即可。构建时以手机自己的 boot 镜像为基础，加 `--partition boot`，并按[构建](#构建)一节把 Novatek 触摸固件放进 ramdisk。
 
 ## 安装 Skyward
 
@@ -183,6 +186,28 @@ target/release/skyward-pack recovery \
   --out target/skyward-nezha.img
 ```
 
+
+红米 Note 11 5G 没有 recovery 分区：boot 镜像里同时带着系统和 recovery。以手机自己的 boot 镜像（已用 Magisk 修补的镜像会保留 root）为基础，指定 boot 分区，并把 Novatek 触摸固件放到内核查找的位置：
+
+```sh
+target/release/skyward-pack recovery \
+  --stock magisk_patched.img \
+  --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
+  --config devices/evergo.toml \
+  --font resources/fonts/MiSansVF.ttf \
+  --mono resources/fonts/KirkMono-Regular.ttf \
+  --mono-license resources/fonts/KirkMono-OFL.txt \
+  --partition boot \
+  --add vendor/firmware/novatek_ts_fw.bin=/path/to/novatek_ts_fw.bin \
+  --add vendor/firmware/novatek_ts_mp.bin=/path/to/novatek_ts_mp.bin \
+  --add vendor/firmware/novatek_ts_ct_fw.bin=/path/to/novatek_ts_ct_fw.bin \
+  --add vendor/firmware/novatek_ts_ct_mp.bin=/path/to/novatek_ts_ct_mp.bin \
+  --out target/skyward-evergo.img
+```
+
+用 `fastboot flash boot target/skyward-evergo.img` 刷入当前启动槽位，按键组合进入 recovery；正常启动仍然进入系统。
+
 测试和代码检查在电脑上运行；只在手机上运行的代码按照手机目标检查：
 
 ```sh
@@ -208,6 +233,9 @@ cargo run --release -p skyward-preview -- target/preview --lang en
 每种语言的文字是 `crates/skyward-ui/locales` 里的一个文件，以地区代码命名，例如 `tr.toml`、`pt-BR.toml`。`en.toml` 是参照文件，每条文字上方的注释说明它显示在哪里。构建时会读取全部文件，缺少某条文字，或者花括号里的名称和英文不一致，构建就会停止。
 
 修正翻译时，直接修改对应语言文件里的文字。用 `skyward-preview --lang` 把页面按这种语言绘制出来检查效果：每绘制完一个页面，它会列出这个页面上显示不下的文字：`cut short in` 是以省略号结尾的文字，`set at 80% in` 是为了放进按键、按钮或滑动条而缩小了字号的文字，`past the edge in` 是超出屏幕的文字，`overlap in` 是互相重叠的两段文字。
+## 维护者
+
+- 天影大侠 (SkyShadowHero)
 
 ## 许可证
 

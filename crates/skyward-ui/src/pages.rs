@@ -349,11 +349,19 @@ pub fn settings(cx: &Ctx) -> Frame {
         out.push(Hit { rect: r, action: Action::Toggle(Switch::Vibrate) });
     }
     y = widgets::section(&mut c, t, f, vibration.bottom, l.pick(texts::settings::GENERAL));
-    let general = widgets::list(&mut c, t, f, y, &[
+    let mut general_rows = vec![
         Row::new(l.pick(texts::page::LANGUAGE)).icon(BLUE, Icon::Globe).trail(Trail::Value(l.name())),
         Row::new(l.pick(texts::page::TIME_ZONE)).icon(ORANGE, Icon::Clock).trail(Trail::Value(l.pick(TIME_ZONES[s.time_zone].0))),
-    ]);
-    out.extend(hits(&general.rows, &[Action::Open(Screen::Language), Action::Open(Screen::TimeZone)]));
+    ];
+    let mut general_opens = vec![Action::Open(Screen::Language), Action::Open(Screen::TimeZone)];
+    // The flashlight's row stands on a phone whose flash driver leaves a
+    // switch for it, showing whether the LED is lit.
+    if let Some(on) = s.flashlight {
+        general_rows.push(Row::new(l.pick(texts::settings::FLASHLIGHT)).icon(ORANGE, Icon::Torch).trail(Trail::Switch(on)));
+        general_opens.push(Action::Toggle(Switch::Torch));
+    }
+    let general = widgets::list(&mut c, t, f, y, &general_rows);
+    out.extend(hits(&general.rows, &general_opens));
     y = widgets::section(&mut c, t, f, general.bottom, "USB");
     let usb = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(texts::settings::FILE_TRANSFER)).icon(BLUE, Icon::Usb).trail(Trail::Switch(s.file_transfer))]);
     out.extend(hits(&usb.rows, &[Action::Toggle(Switch::FileTransfer)]));
@@ -571,6 +579,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     y = widgets::info_card(&mut c, t, f, y + gap, &[
         (l.pick(texts::specs::RECOVERY_VERSION), format!("Skyward {VERSION}")),
         (l.pick(texts::specs::KERNEL_VERSION), i.kernel.clone()),
+        (l.pick(texts::specs::MAINTAINER), "天影大侠 (SkyShadowHero)".to_string()),
     ]);
 
     let mut boot = Vec::new();

@@ -24,8 +24,15 @@ impl App {
     /// made before the slide's first frame keep the page that showed; a
     /// page rendered anew since it last showed gives way at once.
     pub(super) fn leave(&mut self, back: bool) {
+        self.leave_from(back, 0.0);
+    }
+
+    /// The page shown gives way as [`leave`] says, from `along` of the way
+    /// across: a swipe from an edge leaves it part of the way already.
+    pub(super) fn leave_from(&mut self, back: bool, along: f32) {
         if let Some(turn) = self.turn.as_mut().filter(|t| t.spring.is_none()) {
             turn.back = back;
+            turn.start = if back { (along.clamp(0.0, 1.0) * 1000.0).round() as i32 } else { 0 };
             return;
         }
         self.end_turn();
@@ -40,7 +47,7 @@ impl App {
         if let Some(fr) = self.frame.as_ref().filter(|_| self.cols < self.w) {
             left.fill_rect(self.cols as f32, 0.0, (self.w - self.cols) as f32, self.h as f32, fr.bg);
         }
-        self.turn = Some(Turn { back, left, spring: None });
+        self.turn = Some(Turn { back, left, spring: None, start: if back { (along.clamp(0.0, 1.0) * 1000.0).round() as i32 } else { 0 } });
         self.dirty = true;
     }
 
@@ -79,6 +86,12 @@ impl App {
     /// In the file manager, back climbs a folder until it reaches the root,
     /// and in a place, until it reaches the place's top.
     pub(super) fn back(&mut self, now: u64) -> Vec<Effect> {
+        self.back_from(now, 0.0)
+    }
+
+    /// Go back from `along` of the way across, as a swipe from an edge
+    /// already has the page.
+    pub(super) fn back_from(&mut self, now: u64, along: f32) -> Vec<Effect> {
         let (l, mut fx) = (self.state.lang, Vec::new());
         if self.stack.len() <= 1 {
             return fx;
@@ -256,7 +269,7 @@ impl App {
             }
         }
         if !morph {
-            self.leave(true);
+            self.leave_from(true, along);
         }
         self.stack.pop();
         self.state.confirm = 0.0;

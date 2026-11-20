@@ -622,6 +622,7 @@ file_transfer_note = "Si está activada, una computadora puede gestionar los arc
 debugging = "Depuración"
 about = "Acerca de"
 
+flashlight = "Linterna"
 [reboot]
 to = "Reiniciar en"
 next_boot = "Próximo arranque"
@@ -662,6 +663,7 @@ internal_storage = "Almacenamiento interno"
 free_of = "{free} libres de {total}"
 total_unmounted = "{total} en total · partición data no montada"
 
+maintainer = "Mantenedor"
 [decrypt]
 data_partition = "Descifrar la partición data"
 reading_lock = "Leyendo el bloqueo de pantalla"

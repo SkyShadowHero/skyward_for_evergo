@@ -4,8 +4,20 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Where the phone's own partitions keep the table.
-pub const FILES: [&str; 2] = ["/vendor/etc/fstab.qcom", "/odm/etc/fstab.qcom"];
+/// Where the phone's own partitions keep the table: the name a Qualcomm
+/// phone's init is given first, then the names MediaTek and other makers
+/// write theirs under. One of them is there; a name that is not is passed
+/// over.
+pub const FILES: [&str; 8] = [
+    "/vendor/etc/fstab.qcom",
+    "/odm/etc/fstab.qcom",
+    "/vendor/etc/fstab.mt6833",
+    "/odm/etc/fstab.mt6833",
+    "/vendor/etc/fstab.default",
+    "/odm/etc/fstab.default",
+    "/vendor/etc/fstab.emmc",
+    "/odm/etc/fstab.emmc",
+];
 
 /// One filesystem the phone knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
