@@ -636,7 +636,16 @@ impl Responder {
     }
 
     /// The handles GetObjectHandles asks for, or how many: in the top
-    /// folder, in another, or with a parent of 0 every object.
+    /// folder, or in another, or every object.
+    ///
+    /// A parent of 0 means every object of the storage, as the standard
+    /// has it, and a parent of [`PARENT_ROOT`] the top folder's own
+    /// entries. This storage is a live 226 GB folder, not a database: the
+    /// whole of it read out of the disk at once takes minutes, and its
+    /// every folder followed takes more watches than the kernel gives. Both
+    /// are answered with the top folder's entries, which is what the
+    /// computers that write out the root ask for, and the walk the standard
+    /// describes is left to the computer, folder by folder.
     fn object_handles(&mut self, cmd: &Command, count: bool) -> Reply {
         let Some([id, wanted, parent]) = cmd.take::<3>() else { return Reply::code(response::INVALID_PARAMETER) };
         if !self.storage_named(id) {
@@ -644,8 +653,7 @@ impl Responder {
         }
         let store = self.store.as_mut().expect("a session with a storage follows it");
         let found = match parent {
-            0 => store.descendants(TOP),
-            PARENT_ROOT => store.children(TOP),
+            0 | PARENT_ROOT => store.children(TOP),
             folder => store.children(folder),
         };
         let mut handles = match found {
@@ -755,8 +763,13 @@ impl Responder {
 
     /// GetObjectPropList, as the stock system answers it: one object, its
     /// entries with it at a depth of 1, the top folder's entries for an
-    /// object of 0, and every object for all objects at any depth; a
-    /// property of all of them, or one.
+    /// object of 0; a property of all of them, or one.
+    ///
+    /// Every object of the storage cannot be described in one answer: this
+    /// storage is a live 226 GB folder, and both walking the whole of it
+    /// and following its every folder take far more than one answer can
+    /// wait for. The computer reads it folder by folder instead, which the
+    /// standard's depth says it is prepared to do.
     fn object_prop_list(&mut self, cmd: &Command) -> Reply {
         let Some([h, wanted, code, group, depth]) = cmd.take::<5>() else { return Reply::code(response::INVALID_PARAMETER) };
         if code == 0 {
@@ -769,14 +782,18 @@ impl Responder {
                 None => return Reply::code(response::OBJECT_PROP_NOT_SUPPORTED),
             },
         };
-        let (h, depth) = if depth == 0xFFFF_FFFF && (h == 0 || h == 0xFFFF_FFFF) { (0xFFFF_FFFF, 0) } else { (h, depth) };
+        if h == 0xFFFF_FFFF {
+            return Reply::failed(
+                response::SPECIFICATION_BY_DEPTH_UNSUPPORTED,
+                "the properties of every object at once: this storage is read folder by folder",
+            );
+        }
         if depth > 1 {
             return Reply::code(response::SPECIFICATION_BY_DEPTH_UNSUPPORTED);
         }
         let Some(store) = self.store.as_mut() else { return Reply::code(response::INVALID_OBJECT_HANDLE) };
         let mut handles = Vec::new();
         let listed = match h {
-            0xFFFF_FFFF => store.descendants(TOP),
             0 => store.children(TOP),
             _ if !store.contains(h) => return Reply::code(response::INVALID_OBJECT_HANDLE),
             _ if depth == 1 => store.children(h),
@@ -787,7 +804,7 @@ impl Responder {
             Err(store::Error::NotFolder) => {}
             Err(e) => return store_failed(e, response::INVALID_OBJECT_HANDLE),
         }
-        if h != 0 && h != 0xFFFF_FFFF {
+        if h != 0 {
             handles.push(h);
         }
         let mut entries = Writer::new();

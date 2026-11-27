@@ -13,6 +13,7 @@ use skyward_sys::worker::{self, Teller, Told};
 use std::collections::VecDeque;
 use std::io;
 use std::os::unix::fs::FileExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,6 +29,9 @@ const GIVE_BACK: Duration = Duration::from_secs(10);
 
 /// How long init may take to hand the port to adb alone.
 const PORT_SWITCH: Duration = Duration::from_secs(5);
+
+/// The file whose presence asks for every operation to be put in the log.
+const VERBOSE: &str = "/skyward/run/mtp-verbose";
 
 enum Message {
     /// Offer this storage, or none; the sender hears once nothing is under
@@ -193,17 +197,27 @@ enum Ended {
 /// the phone asks in between, until it asks the thread to stop.
 fn serve(port: &mut Port, mut r: Responder, mut mail: Mailbox) -> Result<()> {
     loop {
-        if !port.enabled() && !port.wait_enabled()? {
+        if !port.wait_enabled()? {
             mail.collect();
-            if attend(port, &mut r, &mut mail, 0)? {
-                return Ok(());
+            match attend(port, &mut r, &mut mail, 0) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                // What the phone asked could not be done; the thread keeps
+                // the function for the computer's next try all the same.
+                Err(e) => kmsg(&format!("mtp: what the phone asked: {e:#}"))?,
             }
             continue;
         }
         kmsg("mtp: the computer configured the function")?;
         let ended = session(port, &mut r, &mut mail);
         r.disconnected();
-        port.disconnected().context("give up what was under way")?;
+        // What was under way ends with the function; a function that has
+        // already been let go has nothing left to give up. An endpoint that
+        // will not let go is worth a line, not the end of the thread, whose
+        // descriptors the function, and adb with it, would go with.
+        if let Err(e) = port.disconnected() {
+            kmsg(&format!("mtp: giving up what was under way: {e:#}"))?;
+        }
         match ended? {
             Ended::Stop => return Ok(()),
             Ended::Disconnected => kmsg("mtp: the computer let the function go")?,
@@ -241,14 +255,22 @@ fn session(port: &mut Port, r: &mut Responder, mail: &mut Mailbox) -> Result<End
             Ok(Next::Command(bytes)) => bytes,
             Ok(Next::Changed) => {
                 for e in r.changes() {
-                    port.event(e.code, transaction, e.param)?;
+                    if let Err(e) = port.event(e.code, transaction, e.param) {
+                        kmsg(&format!("mtp: telling the computer of a change: {e}; the session ends"))?;
+                        return Ok(Ended::Disconnected);
+                    }
                 }
                 continue;
             }
             Ok(Next::Woken) => {
                 mail.collect();
-                if attend(port, r, mail, transaction)? {
-                    return Ok(Ended::Stop);
+                match attend(port, r, mail, transaction) {
+                    Ok(true) => return Ok(Ended::Stop),
+                    Ok(false) => {}
+                    Err(e) => {
+                        kmsg(&format!("mtp: what the phone asked: {e:#}; the session ends"))?;
+                        return Ok(Ended::Disconnected);
+                    }
                 }
                 continue;
             }
@@ -258,7 +280,13 @@ fn session(port: &mut Port, r: &mut Responder, mail: &mut Mailbox) -> Result<End
                 kmsg(&format!("mtp: reading a command broke off: {e}"))?;
                 continue;
             }
-            Err(Halt::Failed(e)) => return Err(e).context("read a command"),
+            // The function went, or the endpoint will not read: either way
+            // the session ends and the thread waits for the computer to
+            // configure the function again, its descriptors kept.
+            Err(Halt::Failed(e)) => {
+                kmsg(&format!("mtp: reading a command failed: {e}; the session ends"))?;
+                return Ok(Ended::Disconnected);
+            }
             Err(halt @ (Halt::Cancelled | Halt::Stopped)) => unreachable!("waiting for a command is no transaction to end: {halt:?}"),
         };
         let Some(cmd) = Command::read(&bytes) else {
@@ -272,11 +300,22 @@ fn session(port: &mut Port, r: &mut Responder, mail: &mut Mailbox) -> Result<End
             Err(Halt::Stopped) => kmsg(&format!("mtp: {:#06x} stopped for the storage", cmd.code))?,
             Err(Halt::Aborted(e)) => kmsg(&format!("mtp: {:#06x} given up: {e}", cmd.code))?,
             Err(Halt::Disconnected) => return Ok(Ended::Disconnected),
-            Err(Halt::Failed(e)) => return Err(e).with_context(|| format!("answer {:#06x}", cmd.code)),
+            // Answering failed at the endpoints, not in the storage: the
+            // session ends, and the thread keeps the function's descriptors
+            // for the computer's next try.
+            Err(Halt::Failed(e)) => {
+                kmsg(&format!("mtp: {:#06x} failed: {e}; the session ends", cmd.code))?;
+                return Ok(Ended::Disconnected);
+            }
         }
         mail.collect();
-        if attend(port, r, mail, transaction)? {
-            return Ok(Ended::Stop);
+        match attend(port, r, mail, transaction) {
+            Ok(true) => return Ok(Ended::Stop),
+            Ok(false) => {}
+            Err(e) => {
+                kmsg(&format!("mtp: what the phone asked: {e:#}; the session ends"))?;
+                return Ok(Ended::Disconnected);
+            }
         }
     }
 }
@@ -288,6 +327,7 @@ fn answer(port: &mut Port, r: &mut Responder, mail: &mut Mailbox, cmd: &Command)
         mail.collect();
         mail.urgent()
     };
+    let started = std::time::Instant::now();
     let reply = match r.incoming(cmd) {
         Incoming::None => r.answer(cmd, None),
         Incoming::Dataset => {
@@ -336,10 +376,36 @@ fn answer(port: &mut Port, r: &mut Responder, mail: &mut Mailbox, cmd: &Command)
     if cmd.code == op::OPEN_SESSION && reply.code == response::OK {
         kmsg("mtp: the computer opened a session").map_err(|e| Halt::Failed(io::Error::other(e)))?;
     }
+    // What the answer goes out as, for the log a session writes when asked.
+    let shape = match &reply.data {
+        Some(Outgoing::Dataset(bytes)) => format!("dataset {} bytes", bytes.len()),
+        Some(Outgoing::File { length, .. }) => format!("file {length} bytes"),
+        None => "no data".to_string(),
+    };
     match reply.data {
         Some(Outgoing::Dataset(bytes)) => port.send_data(cmd.code, cmd.transaction, &bytes, &mut stop)?,
         Some(Outgoing::File { file, offset, length }) => port.send_file(cmd.code, cmd.transaction, &file, offset, length, &mut stop)?,
         None => {}
     }
-    port.send_response(reply.code, cmd.transaction, &reply.params, &mut stop)
+    let reply_code = reply.code;
+    port.send_response(reply.code, cmd.transaction, &reply.params, &mut stop)?;
+    if verbose() {
+        let params: Vec<String> = cmd.params.iter().map(|p| format!("{p:#x}")).collect();
+        let why = reply.why.as_deref().map(|why| format!(": {why}")).unwrap_or_default();
+        let line = format!(
+            "{:#06x}({}) -> {:#06x} {shape} in {:.1} ms{why}",
+            cmd.code,
+            params.join(", "),
+            reply_code,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        let _ = kmsg(&format!("mtp: {line}"));
+    }
+    Ok(())
+}
+
+/// Whether the computer asked for every operation to be logged: the page
+/// that tests the function makes this file.
+fn verbose() -> bool {
+    Path::new(VERBOSE).exists()
 }

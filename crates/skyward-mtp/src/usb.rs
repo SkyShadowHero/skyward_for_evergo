@@ -24,9 +24,11 @@ const EP_OUT: &str = "/dev/usb-ffs/mtp/ep2";
 /// Interrupt in, the events.
 const EP_EVENT: &str = "/dev/usb-ffs/mtp/ep3";
 
-/// How much one transfer of a file moves: two of these take turns, one on
-/// the bus while the other is read from the file or written to it.
-const CHUNK: usize = 1 << 20;
+/// The maximum size of one FunctionFS bulk request. MediaTek's MUSB QMU
+/// stores its length in 16 bits, so a 64 KiB request would wrap to zero.
+/// Android uses 16 KiB, a multiple of every advertised bulk packet size.
+const CHUNK: usize = 16 * 1024;
+const _: () = assert!(CHUNK <= u16::MAX as usize && CHUNK.is_multiple_of(1024));
 
 /// What a command is read into; one is a single short packet.
 const COMMAND_MAX: usize = 512;
@@ -427,6 +429,26 @@ fn note(line: &str) {
     let _ = skyward_sys::kmsg(&format!("mtp: {line}"));
 }
 
+/// How long to wait before asking the control endpoint again after the
+/// computer let the function go: long enough that an endpoint that stays in
+/// the error it ended on does not turn the wait into a spin.
+const RECONNECT_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether `error` says the function is gone rather than that one transfer
+/// went wrong: the computer released the function, or the kernel shut the
+/// endpoints down under it. Those end a session and leave the thread waiting
+/// for the computer to configure the function again; they must not end the
+/// thread, which would take the function's descriptors, and adb with them.
+pub fn released(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::ENODEV | libc::ESHUTDOWN | libc::ENXIO | libc::EPIPE))
+}
+
+/// Whether a request that ended with `res`, the kernel's byte count or
+/// error, ended because the function went.
+fn released_result(res: i64) -> bool {
+    [libc::ENODEV, libc::ESHUTDOWN, libc::ENXIO, libc::EPIPE, libc::EAGAIN].iter().any(|&code| res == -i64::from(code))
+}
+
 /// How waiting for a request ended, short of the request ending.
 enum Interrupted {
     Cancel,
@@ -453,13 +475,17 @@ enum Control {
     Cancel,
 }
 
-/// The MTP function: its control endpoint, its three others, and the
-/// transfers on them.
-pub struct Port {
-    // The endpoints close before ep0, so the function can go.
+struct Endpoints {
     bulk_in: File,
     bulk_out: File,
     event_in: File,
+}
+
+/// The MTP function: ep0 holds its descriptors across connections. The
+/// data endpoints are opened anew after the computer configures it.
+pub struct Port {
+    // The endpoints close before ep0, so the function can go.
+    endpoints: Option<Endpoints>,
     aio: Aio,
     ep0: File,
     /// Readable while the phone has something to ask of the function.
@@ -480,26 +506,14 @@ pub struct Port {
 
 impl Port {
     /// Hand the kernel the function's descriptors, which it needs before
-    /// init can bind the function, and open its endpoints; `wake` is what
-    /// the phone wakes the function's thread with.
+    /// init can bind the function. `wake` is what the phone wakes the
+    /// function's thread with.
     pub fn open(wake: RawFd) -> Result<Port> {
         let ep0 = OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC).open(EP0).with_context(|| format!("open {EP0}"))?;
         (&ep0).write_all(descriptors().as_bytes()).context("write the MTP descriptors")?;
         (&ep0).write_all(strings().as_bytes()).context("write the MTP strings")?;
-        // Without blocking, a transfer started as the function goes fails
-        // at once instead of waiting for it to come back.
-        let open = |path: &str, write: bool| {
-            OpenOptions::new()
-                .read(!write)
-                .write(write)
-                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
-                .open(path)
-                .with_context(|| format!("open {path}"))
-        };
         Ok(Port {
-            bulk_in: open(EP_IN, true)?,
-            bulk_out: open(EP_OUT, false)?,
-            event_in: open(EP_EVENT, true)?,
+            endpoints: None,
             aio: Aio::new().context("set up asynchronous I/O")?,
             ep0,
             wake,
@@ -512,14 +526,52 @@ impl Port {
         })
     }
 
-    pub fn enabled(&self) -> bool {
-        self.enabled
+    /// On MediaTek's FunctionFS, disabling an endpoint leaves it in error
+    /// until its file is closed and opened again, even after re-enabling it.
+    fn open_endpoints(&mut self) -> Result<()> {
+        // Without blocking, a transfer started as the function goes fails
+        // at once. FunctionFS needs access in the opposite direction too
+        // for halting the bulk endpoints on cancellation.
+        let open = |path: &str| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(path)
+                .with_context(|| format!("open {path}"))
+        };
+        let endpoints = Endpoints { bulk_in: open(EP_IN)?, bulk_out: open(EP_OUT)?, event_in: open(EP_EVENT)? };
+        let mut desc = [0u8; 9];
+        if unsafe { libc::ioctl(endpoints.bulk_in.as_raw_fd(), ENDPOINT_DESC as _, desc.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error()).context("read the bulk endpoint descriptor");
+        }
+        let packet = usize::from(u16::from_le_bytes([desc[4], desc[5]]) & 0x7ff);
+        anyhow::ensure!(packet != 0 && CHUNK.is_multiple_of(packet), "unexpected bulk packet size {packet}");
+        self.packet = packet;
+        self.endpoints = Some(endpoints);
+        Ok(())
+    }
+
+    fn endpoints(&self) -> &Endpoints {
+        self.endpoints.as_ref().expect("a session has open data endpoints")
     }
 
     /// Wait until the computer configures the function, or the phone has
     /// something to ask; whether the computer did.
     pub fn wait_enabled(&mut self) -> Result<bool> {
-        while !self.enabled {
+        // How many control events in a row could not be answered: the first
+        // is worth a line, and the count as they go on.
+        let mut trouble = 0u32;
+        loop {
+            if self.enabled {
+                match self.open_endpoints() {
+                    Ok(()) => return Ok(true),
+                    Err(e) => {
+                        self.unconfigured();
+                        note(&format!("could not open the data endpoints ({e:#}); waiting for the computer"));
+                    }
+                }
+            }
             let mut fds = [
                 libc::pollfd { fd: self.ep0.as_raw_fd(), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: self.wake, events: libc::POLLIN, revents: 0 },
@@ -532,19 +584,39 @@ impl Port {
                 return Err(e).context("wait for the computer");
             }
             if fds[0].revents != 0 {
-                self.control().context("answer the control endpoint")?;
+                match self.control() {
+                    Ok(_) => trouble = 0,
+                    // The computer let the function go, or the endpoint will
+                    // not answer: either way the function is not configured,
+                    // and the thread keeps its descriptors until the
+                    // computer configures it again. Ending the thread here
+                    // would take the descriptors, and adb with them, down.
+                    Err(e) => {
+                        self.unconfigured();
+                        trouble += 1;
+                        if trouble == 1 || trouble.is_multiple_of(100) {
+                            note(&format!("the control endpoint could not be answered ({e}); waiting for the computer"));
+                        }
+                        std::thread::sleep(RECONNECT_PAUSE);
+                    }
+                }
             }
             if fds[1].revents != 0 {
                 return Ok(false);
             }
         }
-        Ok(true)
     }
 
     /// Read one event from the control endpoint and answer it.
     fn control(&mut self) -> io::Result<Option<Control>> {
         let mut buf = [0u8; size_of::<Event>()];
         let n = (&self.ep0).read(&mut buf)?;
+        if n == 0 {
+            // A function that has been unbound reads as nothing, as one that
+            // the computer let go does when it is about to be configured
+            // again: the thread waits for the next event instead of ending.
+            return Err(io::Error::from_raw_os_error(libc::ENODEV));
+        }
         if n != buf.len() {
             return Err(io::Error::new(ErrorKind::InvalidData, format!("a control event of {n} bytes")));
         }
@@ -552,7 +624,6 @@ impl Port {
         Ok(match ev.kind {
             ENABLE => {
                 self.enabled = true;
-                self.packet = self.packet_size()?;
                 Some(Control::Enabled)
             }
             DISABLE | UNBIND => {
@@ -587,7 +658,8 @@ impl Port {
                 if self.cancelled {
                     // Which endpoints the cancelling halted, for the
                     // computer to clear.
-                    let ends = [&self.bulk_in, &self.bulk_out].map(|f| unsafe { libc::ioctl(f.as_raw_fd(), ENDPOINT_REVMAP as _) } as u16);
+                    let endpoints = self.endpoints();
+                    let ends = [&endpoints.bulk_in, &endpoints.bulk_out].map(|f| unsafe { libc::ioctl(f.as_raw_fd(), ENDPOINT_REVMAP as _) } as u16);
                     status.extend(8u16.to_le_bytes());
                     status.extend(response::TRANSACTION_CANCELLED.to_le_bytes());
                     for end in ends {
@@ -615,24 +687,16 @@ impl Port {
         }
     }
 
-    /// The bulk endpoints' packet size at the speed connected at.
-    fn packet_size(&self) -> io::Result<usize> {
-        let mut desc = [0u8; 9];
-        if unsafe { libc::ioctl(self.bulk_in.as_raw_fd(), ENDPOINT_DESC as _, desc.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(usize::from(u16::from_le_bytes([desc[4], desc[5]]) & 0x7ff))
-    }
-
     /// Start moving `len` bytes at `buf`, to the computer with `write`.
     ///
     /// # Safety
     /// The bytes at `buf` stay in place until the request has ended.
     unsafe fn start(&mut self, buf: *mut u8, len: usize, write: bool) -> Result<u64, Halt> {
-        let fd = if write { self.bulk_in.as_raw_fd() } else { self.bulk_out.as_raw_fd() };
+        let endpoints = self.endpoints();
+        let fd = if write { endpoints.bulk_in.as_raw_fd() } else { endpoints.bulk_out.as_raw_fd() };
         match unsafe { self.aio.submit(fd, buf, len, write) } {
             Ok(key) => Ok(key),
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EAGAIN | libc::ESHUTDOWN)) => {
+            Err(e) if released(&e) || e.raw_os_error() == Some(libc::EAGAIN) => {
                 self.unconfigured();
                 Err(Halt::Disconnected)
             }
@@ -642,10 +706,18 @@ impl Port {
 
     /// What a request's result comes to: the bytes it moved, or why none
     /// were.
-    fn moved(&mut self, res: i64) -> Result<usize, Halt> {
+    fn moved(&mut self, res: i64, write_len: Option<usize>) -> Result<usize, Halt> {
         match res {
-            r if r >= 0 => Ok(r as usize),
-            r if r == -i64::from(libc::ESHUTDOWN) || r == -i64::from(libc::EAGAIN) => {
+            r if r >= 0 => {
+                let moved = r as usize;
+                if let Some(expected) = write_len
+                    && moved != expected
+                {
+                    return Err(Halt::Aborted(io::Error::new(ErrorKind::WriteZero, format!("the bulk endpoint sent {moved} of {expected} bytes"))));
+                }
+                Ok(moved)
+            }
+            r if released_result(r) => {
                 self.unconfigured();
                 Err(Halt::Disconnected)
             }
@@ -693,10 +765,25 @@ impl Port {
                 return Err(e.into());
             }
             if fds[1].revents != 0 {
-                match self.control()? {
-                    Some(Control::Cancel) => return Ok(Err(Interrupted::Cancel)),
-                    Some(Control::Disabled) => return Ok(Err(Interrupted::Disconnect)),
-                    Some(Control::Enabled) | None => {}
+                match self.control() {
+                    Ok(Some(Control::Cancel)) => return Ok(Err(Interrupted::Cancel)),
+                    Ok(Some(Control::Disabled)) => return Ok(Err(Interrupted::Disconnect)),
+                    // The computer configured the function again while a
+                    // session was under way, which it only does after it let
+                    // the function go: what was under way belongs to the
+                    // computer that has gone, and the session starts afresh
+                    // for the one that came.
+                    Ok(Some(Control::Enabled)) => return Ok(Err(Interrupted::Disconnect)),
+                    Ok(None) => {}
+                    // The function went as a transfer waited, or the
+                    // endpoint will not answer: the session is over, and the
+                    // thread waits for the computer to configure the
+                    // function again rather than ending with it.
+                    Err(e) => {
+                        self.unconfigured();
+                        note(&format!("the control endpoint could not be answered ({e}); the session ends"));
+                        return Ok(Err(Interrupted::Disconnect));
+                    }
                 }
             }
             if fds[2].revents != 0 {
@@ -738,23 +825,23 @@ impl Port {
     /// the one that receives, halts it; one gone with the function needs
     /// no halting.
     fn halt(&mut self) {
+        let endpoints = self.endpoints();
         unsafe {
-            libc::read(self.bulk_in.as_raw_fd(), std::ptr::null_mut(), 0);
-            libc::write(self.bulk_out.as_raw_fd(), std::ptr::null(), 0);
+            libc::read(endpoints.bulk_in.as_raw_fd(), std::ptr::null_mut(), 0);
+            libc::write(endpoints.bulk_out.as_raw_fd(), std::ptr::null(), 0);
         }
         self.cancelled = true;
     }
 
-    /// Wait for request `key` of a transaction: the bytes it moved. A
-    /// cancel gives it up, as does the function going, or the phone
-    /// waking the thread when `stop` says that ends the transfer.
-    fn wait(&mut self, key: u64, stop: &mut dyn FnMut() -> bool) -> Result<usize, Halt> {
+    /// Wait for request `key` of a transaction: the bytes it moved. A write
+    /// must send all its bytes. A cancel, disconnect or `stop` gives it up.
+    fn wait(&mut self, key: u64, write_len: Option<usize>, stop: &mut dyn FnMut() -> bool) -> Result<usize, Halt> {
         loop {
             let interrupted = match self.finish(key, None) {
                 Ok(Ok(res)) => {
-                    return match self.moved(res) {
+                    return match self.moved(res, write_len) {
                         Err(Halt::Aborted(e)) => {
-                            self.abort(key, true)?;
+                            self.halt();
                             Err(Halt::Aborted(e))
                         }
                         other => other,
@@ -788,7 +875,7 @@ impl Port {
     fn transfer(&mut self, buf: &mut [u8], write: bool, stop: &mut dyn FnMut() -> bool) -> Result<usize, Halt> {
         // Safety: `buf` is borrowed until the wait has seen the request end.
         let key = unsafe { self.start(buf.as_mut_ptr(), buf.len(), write)? };
-        self.wait(key, stop)
+        self.wait(key, write.then_some(buf.len()), stop)
     }
 
     /// The next command, or what came before it: the phone waking the
@@ -810,7 +897,7 @@ impl Port {
             match self.finish(key, watch) {
                 Ok(Ok(res)) => {
                     let (_, buf) = self.reading.take().expect("the command read was under way");
-                    let n = self.moved(res)?;
+                    let n = self.moved(res, None)?;
                     if n > 0 {
                         return Ok(Next::Command(buf[..n].to_vec()));
                     }
@@ -876,7 +963,7 @@ impl Port {
         // Fill a buffer from `start` with what comes next of the file: how
         // far it is full.
         let fill = |buf: &mut [u8], start: usize, at: &mut u64| -> io::Result<usize> {
-            let n = (buf.len() - start).min((end - *at) as usize);
+            let n = (end - *at).min((buf.len() - start) as u64) as usize;
             file.read_exact_at(&mut buf[start..start + n], *at)?;
             *at += n as u64;
             Ok(start + n)
@@ -911,7 +998,7 @@ impl Port {
             } else {
                 0
             };
-            self.wait(key, stop)?;
+            self.wait(key, Some(len), stop)?;
             if next == 0 {
                 break;
             }
@@ -990,7 +1077,7 @@ impl Port {
                 }
             }
             let Some((key, asked)) = next else { break };
-            let got = self.wait(key, stop)?;
+            let got = self.wait(key, None, stop)?;
             (len, more) = take(got, got == asked, &mut left);
             (cur, from) = (1 - cur, 0);
         }
@@ -1009,13 +1096,13 @@ impl Port {
     }
 
     fn next_event(&mut self) -> io::Result<()> {
-        if !self.enabled {
+        let Some(endpoints) = self.endpoints.as_ref().filter(|_| self.enabled) else {
             self.events.clear();
             return Ok(());
-        }
+        };
         let Some(bytes) = self.events.pop_front() else { return Ok(()) };
         let mut boxed = Box::new(bytes);
-        let fd = self.event_in.as_raw_fd();
+        let fd = endpoints.event_in.as_raw_fd();
         // Safety: the box goes with the request and is kept until it ends.
         match unsafe { self.aio.submit(fd, boxed.as_mut_ptr(), boxed.len(), true) } {
             Ok(key) => {
@@ -1030,8 +1117,8 @@ impl Port {
         }
     }
 
-    /// The connection ended: events waiting go, the one going and the
-    /// command being read are given up.
+    /// The connection ended: cancel requests before closing their data
+    /// endpoints. Keep ep0 so the function stays bound.
     pub fn disconnected(&mut self) -> io::Result<()> {
         self.events.clear();
         if let Some((key, _)) = &self.event {
@@ -1041,6 +1128,7 @@ impl Port {
         self.event = None;
         self.stop_reading()?;
         self.cancelled = false;
+        self.endpoints = None;
         Ok(())
     }
 }

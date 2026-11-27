@@ -58,11 +58,24 @@ pub struct Store {
     watch: Watch,
     /// Changes found while reading folders again, told with the next ones.
     found: Vec<Change>,
+    /// Folders the system would not follow, and would not let read: the
+    /// first failure is put in the log, with a count once there are many.
+    unfollowed: u32,
 }
+
+/// Put `line` in the kernel log, where the recovery's own lines go; a
+/// computer running the tests has no kernel log to put it in.
+#[cfg(target_os = "android")]
+fn note(line: &str) {
+    let _ = skyward_sys::kmsg(&format!("mtp: {line}"));
+}
+
+#[cfg(not(target_os = "android"))]
+fn note(_line: &str) {}
 
 impl Store {
     pub fn new(top: PathBuf) -> io::Result<Store> {
-        Ok(Store { top, entries: HashMap::new(), root: Folder::default(), next: 1, watch: Watch::new()?, found: Vec::new() })
+        Ok(Store { top, entries: HashMap::new(), root: Folder::default(), next: 1, watch: Watch::new()?, found: Vec::new(), unfollowed: 0 })
     }
 
     pub fn top(&self) -> &Path {
@@ -161,12 +174,25 @@ impl Store {
     fn read(&mut self, folder: u32, tell_added: bool) -> Result<(), Error> {
         let path = self.path(folder).ok_or(Error::Unknown)?;
         if self.folder(folder)?.watch.is_none() {
-            let watch = self.watch.add(&path, folder);
-            self.folder_mut(folder)?.watch = watch;
+            match self.watch.add(&path, folder) {
+                Ok(watch) => self.folder_mut(folder)?.watch = watch,
+                // A folder that cannot be followed is read again each time
+                // it is asked for; with every watch taken, that is what the
+                // folders below it get too. The first is worth a line, and
+                // the count as they go on.
+                Err(e) => {
+                    self.unfollowed += 1;
+                    let count = self.unfollowed;
+                    if count == 1 || count.is_multiple_of(1000) {
+                        note(&format!("cannot follow the folder {} ({e}); {count} folder(s) not followed", path.display()));
+                    }
+                }
+            }
         }
         let mut on_disk = BTreeMap::new();
-        for entry in fs::read_dir(&path).map_err(Error::Io)? {
-            let entry = entry.map_err(Error::Io)?;
+        let reading = |e: io::Error| Error::Io(io::Error::new(e.kind(), format!("read the folder {}: {e}", path.display())));
+        for entry in fs::read_dir(&path).map_err(&reading)? {
+            let entry = entry.map_err(&reading)?;
             on_disk.insert(entry.file_name(), is_dir(&entry.path()));
         }
         let known: Vec<(OsString, u32)> = self.folder(folder)?.entries.iter().map(|(n, &h)| (n.clone(), h)).collect();
@@ -347,18 +373,18 @@ impl Watch {
         Some(self.fd.as_raw_fd())
     }
 
-    /// Follow the folder at `path`; `None` where the system follows no
-    /// more, and the folder is read again each time instead.
-    fn add(&mut self, path: &Path, folder: u32) -> Option<i32> {
+    /// Follow the folder at `path`; the watch it is followed by, or why the
+    /// system would not follow it.
+    fn add(&mut self, path: &Path, folder: u32) -> io::Result<Option<i32>> {
         use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return Ok(None) };
         let wd = unsafe { libc::inotify_add_watch(self.fd.as_raw_fd(), c.as_ptr(), Self::MASK) };
         if wd < 0 {
-            return None;
+            return Err(io::Error::last_os_error());
         }
         self.folders.insert(wd, folder);
-        Some(wd)
+        Ok(Some(wd))
     }
 
     fn remove(&mut self, wd: i32) {
@@ -444,8 +470,8 @@ impl Watch {
         None
     }
 
-    fn add(&mut self, _path: &Path, _folder: u32) -> Option<i32> {
-        None
+    fn add(&mut self, _path: &Path, _folder: u32) -> io::Result<Option<i32>> {
+        Ok(None)
     }
 
     fn remove(&mut self, _wd: i32) {}

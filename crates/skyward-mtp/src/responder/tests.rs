@@ -219,8 +219,12 @@ fn folders_list_their_entries_and_objects_describe_themselves() {
     let camera = find(&mut r, dcim, "Camera");
     let photo = find(&mut r, camera, "IMG_1.jpg");
     assert_eq!(info(&mut r, photo).parent, camera);
-    assert_eq!(handles(&mut r, 0, 0).len(), 4, "a parent of 0 is every object");
-    assert_eq!(handles(&mut r, 0, u32::from(format::EXIF_JPEG)), [photo]);
+    // A storage of this size answers a parent of 0 with its top folder's
+    // entries, as it does a parent of 0xFFFFFFFF; the computer reads the
+    // folders below one by one.
+    assert_eq!(handles(&mut r, 0, 0).len(), 2, "a parent of 0 is the top folder's entries");
+    assert!(handles(&mut r, 0, u32::from(format::EXIF_JPEG)).is_empty(), "no photo at the top");
+    assert_eq!(handles(&mut r, 0xFFFF_FFFF, 0).len(), 2);
     let count = r.answer(&cmd(op::GET_NUM_OBJECTS, &[STORAGE_ID, 0, 0xFFFF_FFFF]), None);
     assert_eq!((count.code, count.params), (response::OK, vec![2]));
     assert_eq!(r.answer(&cmd(op::GET_OBJECT_HANDLES, &[STORAGE_ID, 0, notes]), None).code, response::INVALID_PARENT_OBJECT);
@@ -255,7 +259,7 @@ fn prop_list(bytes: &[u8]) -> Vec<(u32, u16, u16, Vec<u8>)> {
 }
 
 #[test]
-fn property_lists_go_as_deep_as_the_stock_system_s() {
+fn property_lists_read_one_object_and_the_entries_below_it() {
     let at = scratch("props");
     fs::create_dir_all(at.join("Music")).unwrap();
     fs::write(at.join("Music/song.mp3"), b"mp3").unwrap();
@@ -275,10 +279,11 @@ fn property_lists_go_as_deep_as_the_stock_system_s() {
     let top = prop_list(&dataset(r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[0, 0, u32::from(prop::PARENT_OBJECT), 0, 0]), None)));
     assert_eq!(top.len(), 2, "the top folder's entries");
     assert!(top.iter().all(|(.., v)| v.as_slice() == [0, 0, 0, 0]), "at the top, with no parent");
-    let all = prop_list(&dataset(r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[0xFFFF_FFFF, 0, u32::from(prop::OBJECT_FORMAT), 0, 0xFFFF_FFFF]), None)));
-    assert_eq!(all.len(), 3, "every object");
-    let only_mp3 = prop_list(&dataset(r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[0xFFFF_FFFF, u32::from(format::MP3), u32::from(prop::OBJECT_FORMAT), 0, 0]), None)));
-    assert_eq!(only_mp3.len(), 1);
+    // Every object at once is more than a live storage answers in one
+    // answer: a computer expects that and reads folder by folder.
+    let all = r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[0xFFFF_FFFF, 0, u32::from(prop::OBJECT_FORMAT), 0, 0xFFFF_FFFF]), None);
+    assert_eq!(all.code, response::SPECIFICATION_BY_DEPTH_UNSUPPORTED);
+    assert!(all.why.is_some(), "the log says why");
     assert_eq!(r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[a, 0, 0, 0, 0]), None).code, response::PARAMETER_NOT_SUPPORTED);
     assert_eq!(r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[a, 0, 0, 1, 0]), None).code, response::SPECIFICATION_BY_GROUP_UNSUPPORTED);
     assert_eq!(r.answer(&cmd(op::GET_OBJECT_PROP_LIST, &[music, 0, 0xFFFF_FFFF, 0, 2]), None).code, response::SPECIFICATION_BY_DEPTH_UNSUPPORTED);
