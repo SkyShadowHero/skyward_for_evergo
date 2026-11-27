@@ -149,7 +149,7 @@ pub fn check(update: &Update, phone: &Phone) -> Result<(), Refusal> {
         return Err(Refusal::NotAb(kind.to_string()));
     }
     let devices = m.get("pre-device").unwrap_or_default();
-    if !listed(&phone.device, devices) {
+    if !listed(&phone.device, devices) && !family(&phone.device, devices) {
         return Err(Refusal::OtherDevice(devices.to_string()));
     }
     if let Some(serials) = m.get("serialno")
@@ -181,7 +181,19 @@ pub fn check(update: &Update, phone: &Phone) -> Result<(), Refusal> {
 
 /// Whether `name` is one of the `|`-separated names in `list`.
 fn listed(name: &str, list: &str) -> bool {
-    list.split('|').any(|n| n.trim() == name)
+    // Android's metadata writes the devices with a pipe; some packages
+    // write them with commas, and both mean the same list.
+    list.split(['|', ',']).any(|n| n.trim() == name)
+}
+
+/// The codenames the unified everpal tree builds one package for: a phone
+/// of one of them can install a package that names another.
+fn family(name: &str, list: &str) -> bool {
+    let known: &[&str] = match name {
+        "evergo" | "everpal" | "evergreen" | "opal" => &["evergo", "everpal", "evergreen", "opal"][..],
+        _ => &[],
+    };
+    list.split(['|', ',']).any(|n| known.contains(&n.trim()))
 }
 
 #[cfg(test)]
@@ -247,6 +259,8 @@ METADATA_SIZE=1024
         assert_eq!(check(&update_with(&other, PROPERTIES_TEXT), &phone()), Err(Refusal::OtherDevice("nezha".into())));
         let listed = METADATA_TEXT.replace("pre-device=ishtar", "pre-device=nezha|ishtar");
         assert_eq!(check(&update_with(&listed, PROPERTIES_TEXT), &phone()), Ok(()));
+        let comma = METADATA_TEXT.replace("pre-device=ishtar", "pre-device=nezha,ishtar");
+        assert_eq!(check(&update_with(&comma, PROPERTIES_TEXT), &phone()), Ok(()), "commas name the same list");
         let serial = format!("{METADATA_TEXT}serialno=abc|def\n");
         assert_eq!(check(&update_with(&serial, PROPERTIES_TEXT), &phone()), Err(Refusal::OtherSerial));
         let ours = format!("{METADATA_TEXT}serialno=abc|2674dc3e\n");

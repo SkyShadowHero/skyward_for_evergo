@@ -73,8 +73,14 @@ fn check(metadata: &Metadata, phone: &Phone, tags: &str) -> Result<(), Refusal> 
         return Err(Refusal::NotBrick(kind.to_string()));
     }
     let devices = metadata.get("pre-device").unwrap_or_default();
-    if !devices.split('|').any(|name| name.trim() == phone.device) {
-        return Err(Refusal::OtherDevice(devices.to_string()));
+    if !devices.split(['|', ',']).any(|name| name.trim() == phone.device) {
+        let known: &[&str] = match phone.device.as_str() {
+            "evergo" | "everpal" | "evergreen" | "opal" => &["evergo", "everpal", "evergreen", "opal"][..],
+            _ => &[],
+        };
+        if !devices.split(['|', ',']).any(|name| known.contains(&name.trim())) {
+            return Err(Refusal::OtherDevice(devices.to_string()));
+        }
     }
     match metadata.get("serialno") {
         Some(serials) => {
