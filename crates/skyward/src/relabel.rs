@@ -3,9 +3,10 @@
 //! as Android's restorecon looks them up.
 
 use anyhow::{ensure, Context, Result};
+use skyward_block::labels::Rules;
 use skyward_files::Relabeling;
 use skyward_vab::Slot;
-use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -61,84 +62,6 @@ pub fn rule_files(slot: Slot) -> Result<Vec<PathBuf>> {
     let system = skyward_vab::mount_point("system").join(RULES[0].1);
     ensure!(found.first() == Some(&system), "the system keeps no rules at {}", system.display());
     Ok(found)
-}
-
-#[repr(C)]
-struct SelinuxOpt {
-    kind: c_int,
-    value: *const c_char,
-}
-
-/// The kind of labels looked up, files', and the option naming a file of
-/// rules, as libselinux's label.h numbers them.
-const SELABEL_CTX_FILE: c_uint = 0;
-const SELABEL_OPT_PATH: c_int = 3;
-
-type Open = unsafe extern "C" fn(c_uint, *const SelinuxOpt, c_uint) -> *mut c_void;
-type Lookup = unsafe extern "C" fn(*mut c_void, *mut *mut c_char, *const c_char, c_int) -> c_int;
-type Close = unsafe extern "C" fn(*mut c_void);
-type Free = unsafe extern "C" fn(*mut c_char);
-
-/// Rules for labeling files, read by the recovery's libselinux.
-struct Rules {
-    lib: *mut c_void,
-    handle: *mut c_void,
-    lookup: Lookup,
-    close: Close,
-    free: Free,
-}
-
-impl Rules {
-    /// The rules in `files`, a later file's taking the place of an earlier
-    /// one's for the same path, as Android reads them.
-    fn open(files: &[PathBuf]) -> Result<Rules> {
-        let lib = unsafe { libc::dlopen(c"libselinux.so".as_ptr(), libc::RTLD_NOW) };
-        ensure!(!lib.is_null(), "load libselinux.so: {}", unsafe { CStr::from_ptr(libc::dlerror()) }.to_string_lossy());
-        let find = |name: &CStr| -> Result<*mut c_void> {
-            let symbol = unsafe { libc::dlsym(lib, name.as_ptr()) };
-            ensure!(!symbol.is_null(), "find {} in libselinux.so", name.to_string_lossy());
-            Ok(symbol)
-        };
-        let open: Open = unsafe { std::mem::transmute::<*mut c_void, Open>(find(c"selabel_open")?) };
-        let lookup = unsafe { std::mem::transmute::<*mut c_void, Lookup>(find(c"selabel_lookup")?) };
-        let close = unsafe { std::mem::transmute::<*mut c_void, Close>(find(c"selabel_close")?) };
-        let free = unsafe { std::mem::transmute::<*mut c_void, Free>(find(c"freecon")?) };
-        let paths = files.iter().map(|f| CString::new(f.as_os_str().as_bytes())).collect::<Result<Vec<_>, _>>().context("a rules path holds a NUL")?;
-        let opts: Vec<SelinuxOpt> = paths.iter().map(|p| SelinuxOpt { kind: SELABEL_OPT_PATH, value: p.as_ptr() }).collect();
-        let handle = unsafe { open(SELABEL_CTX_FILE, opts.as_ptr(), opts.len() as c_uint) };
-        if handle.is_null() {
-            let e = std::io::Error::last_os_error();
-            unsafe { libc::dlclose(lib) };
-            return Err(e).with_context(|| format!("read the labeling rules in {files:?}"));
-        }
-        Ok(Rules { lib, handle, lookup, close, free })
-    }
-
-    /// The label the rules give the entry the system names `path`, of the
-    /// type in `mode`, as the attribute stores it; none where no rule does.
-    fn lookup(&self, path: &Path, mode: u32) -> Result<Option<Vec<u8>>> {
-        let key = CString::new(path.as_os_str().as_bytes()).with_context(|| format!("{} holds a NUL", path.display()))?;
-        let mut found: *mut c_char = std::ptr::null_mut();
-        if unsafe { (self.lookup)(self.handle, &mut found, key.as_ptr(), mode as c_int) } < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.raw_os_error() == Some(libc::ENOENT) {
-                return Ok(None);
-            }
-            return Err(e).with_context(|| format!("look up the label of {}", path.display()));
-        }
-        let label = unsafe { CStr::from_ptr(found) }.to_bytes_with_nul().to_vec();
-        unsafe { (self.free)(found) };
-        Ok(Some(label))
-    }
-}
-
-impl Drop for Rules {
-    fn drop(&mut self) {
-        unsafe {
-            (self.close)(self.handle);
-            libc::dlclose(self.lib);
-        }
-    }
 }
 
 /// The label an entry carries, without the NUL it is stored with; none on

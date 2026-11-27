@@ -1,12 +1,18 @@
 //! A second system beside the one installed: its root in a fixed area of
 //! the data partition, and the boot sets of both, the kernel and ramdisk
 //! the bootloader starts, kept in a store area of their own. Switching
-//! writes one or the other into the boot and init_boot partitions of the
-//! slot that starts next; nothing else of the phone changes.
+//! writes one or the other into the boot partitions of the slot that starts
+//! next; nothing else of the phone changes. On most phones the first
+//! ramdisk of each system is an init_boot partition of its own, beside the
+//! boot partition; on a phone whose boot image holds the kernel and the
+//! first ramdisk together, it is that boot image, made of the other
+//! system's kernel and the installed system's own first ramdisk, and the
+//! boot partition alone is written.
 
 use std::collections::HashMap;
 
 pub mod boot;
+pub mod footer;
 pub mod install;
 pub mod package;
 pub mod state;

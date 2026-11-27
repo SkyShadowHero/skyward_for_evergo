@@ -76,6 +76,9 @@ pub struct System {
     /// The program its root starts with.
     pub init: String,
     pub root: Area,
+    /// A boot carrier's private Android /metadata and /data, once prepared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android: Option<Area>,
     pub set: Saved,
     /// The bytes of the system's own ramdisk, which comes first in the
     /// ramdisk of its init_boot image, where it brings one.
@@ -89,7 +92,7 @@ pub struct System {
 impl System {
     /// What Skyward's program reads of the system, to start it.
     pub fn start(&self) -> Start {
-        Start { id: self.id.clone(), filesystem: self.filesystem.clone(), init: self.init.clone(), root: self.root.clone() }
+        Start { id: self.id.clone(), filesystem: self.filesystem.clone(), init: self.init.clone(), root: self.root.clone(), android: self.android.clone() }
     }
 }
 
@@ -180,6 +183,7 @@ pub(crate) mod tests {
                 filesystem: "ext4".into(),
                 init: "/sbin/init".into(),
                 root: area("/data/skyward/systems/test", 1 << 20),
+                android: None,
                 set: Saved { entry: 2, boot: "cc".into(), init_boot: "dd".into() },
                 own_ramdisk: Some(4096),
                 vendor_boot: "ee".into(),

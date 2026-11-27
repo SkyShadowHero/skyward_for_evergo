@@ -95,9 +95,13 @@ pub struct State {
     /// The slot picked on the slot page to start next; with none picked,
     /// the page shows the one the boot control starts next.
     pub next_slot: Option<Slot>,
-    /// The phone has what a second system needs: boot and init_boot
-    /// partitions in both slots, which a switch writes, and recovery
-    /// partitions apart from them, which keep Skyward through it.
+    /// The phone has what a second system needs: boot partitions in both
+    /// slots, which a switch writes, with the first ramdisk of each system
+    /// either in an init_boot partition of its own, as most phones keep it,
+    /// or in the boot partition beside the kernel, as a phone whose boot
+    /// image the bootloader unpacks for the recovery too keeps it; and
+    /// recovery partitions apart from them where the phone has them, which
+    /// keep Skyward through it.
     pub dual_boot: bool,
     /// The systems, as the runtime last read them, or why it could not;
     /// none until it has.

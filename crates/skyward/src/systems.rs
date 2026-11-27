@@ -46,17 +46,20 @@ pub fn next_slot() -> Result<Slot> {
 }
 
 /// The systems as they are now: the installed one named by its build's
-/// properties, its version by `version_prop`, whether its vendor_boot or
-/// dtbo in the slot that starts next changed since the second system was
-/// installed, and what the boot partitions hold, which are those of the
-/// slot the phone started from where nothing is kept of them.
+/// properties, its version by `version_prop`, whether its kernel side in the
+/// slot that starts next changed since the second system was installed, and
+/// what the boot partitions hold, which are those of the slot the phone
+/// started from where nothing is kept of them.
 fn read(version_prop: &str) -> Result<Overview> {
     let current = skyward_vab::current_slot()?.context("not an A/B phone")?;
     let props = skyward_info::installed_props(current)?;
     let state = install::state()?;
-    let changed = match state.system {
-        Some(_) => install::changed(&state, next_slot()?)?,
-        None => false,
+    // A phone whose boot image holds the first ramdisk keeps its own copy of
+    // it for the second system, and starts it with none of the installed
+    // system's vendor_boot or dtbo, so the boot control is not asked of it.
+    let changed = match (&state.system, state.store.as_ref()) {
+        (Some(_), Some(store)) if store.init_boot > 0 => install::changed(&state, next_slot()?)?,
+        _ => false,
     };
     let held = install::held(&state, current)?;
     Ok(install::overview(&state, skyward_systems::installed_name(&props, version_prop), changed, held))
@@ -83,10 +86,19 @@ fn resume() -> Result<Option<Who>> {
 /// system that starts already is left as it is.
 fn switch(to: Who) -> Result<()> {
     install::resume()?;
-    if starting(&install::state()?) == to {
+    let state = install::state()?;
+    if starting(&state) == to {
         return Ok(());
     }
-    install::switch_to(next_slot()?, to)
+    // The boot set goes into the boot partition of the slot that starts
+    // next. On a phone whose boot image holds the first ramdisk, that is the
+    // slot this recovery was started from, and its boot control is not
+    // asked: the boot partitions alone carry both systems.
+    let slot = match state.store.as_ref().is_some_and(|store| store.init_boot == 0) {
+        true => skyward_vab::current_slot()?.context("not an A/B phone")?,
+        false => next_slot()?,
+    };
+    install::switch_to(slot, to)
 }
 
 /// What a switch tells: the system it went to, or why it did not go.

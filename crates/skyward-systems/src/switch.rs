@@ -5,7 +5,9 @@
 //! never lost: it is saved before anything is written over it, into the
 //! entry its last save is not in, and that save counts only once whole.
 //! The other system starts with the program of the Skyward that switches
-//! to it, put into its init_boot image as it is written.
+//! to it, put into its init_boot image as it is written; on a phone whose
+//! boot image holds the kernel and the first ramdisk together, its kernel
+//! is joined to the current recovery ramdisk as it is written.
 
 use crate::boot;
 use crate::state::{State, Switching, Who};
@@ -39,14 +41,21 @@ pub fn switch(places: &Places, next: Slot, to: Who) -> Result<()> {
         (Who::Installed, None) => bail!("the installed system's boot set is in the partitions already"),
     };
     // Made before the switch begins, so that a switch begun is one that
-    // can be finished.
-    let init_boot = match to {
-        Who::Other => Some(other_init_boot(places, &state)?),
-        Who::Installed => None,
+    // can be finished: the boot set of the other system made again with the
+    // program of the Skyward that switches to it, whether an init_boot image
+    // of its own or the whole boot image of a phone whose boot partition
+    // holds both systems' first ramdisks.
+    let made = match (to, state.store.as_ref().is_some_and(|store| store.init_boot == 0)) {
+        (Who::Other, true) => Some(carrier_boot_set(places, &state, next)?),
+        _ => None,
+    };
+    let init_boot = match (to, state.store.as_ref().is_some_and(|store| store.init_boot > 0)) {
+        (Who::Other, true) => Some(other_init_boot(places, &state)?),
+        _ => None,
     };
     state.switching = Some(Switching { to, slot, saved: false });
     state.save(places.state)?;
-    finish(places, &mut state, init_boot)
+    finish(places, &mut state, init_boot, made)
 }
 
 /// Finish a switch begun before and cut off, where one was; says whether
@@ -56,8 +65,44 @@ pub fn resume(places: &Places) -> Result<bool> {
     if state.switching.is_none() {
         return Ok(false);
     }
-    finish(places, &mut state, None)?;
+    finish(places, &mut state, None, None)?;
     Ok(true)
+}
+
+/// Use the saved recovery on resume: the boot partition can already be
+/// partly overwritten by the carrier at that point.
+fn carrier_boot_set(places: &Places, state: &State, slot: Slot) -> Result<Vec<u8>> {
+    let store = state.store.as_ref().context("no store holds the boot sets")?;
+    let system = state.system.as_ref().context("no other system is installed")?;
+    let stored = store::boot(store, places.store, &system.set)?;
+    let program = fs::read(places.program).with_context(|| format!("read {}", places.program.display()))?;
+    let recovery = if state.switching.as_ref().is_some_and(|s| s.saved) {
+        store::boot(store, places.store, state.saved.as_ref().context("the installed system's boot set was never saved")?)?
+    } else {
+        let path = store::partition(places.by_name, store::BOOT, slot);
+        fs::read(&path).with_context(|| format!("read {}", path.display()))?
+    };
+    boot::carrier_with_recovery(&stored, &recovery, &program, &system.start(), store.boot)
+}
+
+/// Restore the installed boot image from a running carrier before entering
+/// Recovery. Even an interrupted switch to the carrier can be rolled back
+/// once the installed image was saved and verified.
+pub fn roll_back_carrier(places: &Places, slot: Slot) -> Result<()> {
+    let mut state = State::load(places.state)?;
+    ensure!(state.store.as_ref().is_some_and(|store| store.init_boot == 0), "no boot carrier was recorded");
+    ensure!(state.saved.is_some(), "the installed system's boot set was never saved");
+    let suffix = slot.suffix();
+    match &state.switching {
+        None => {
+            ensure!(state.occupied.as_deref() == Some(suffix), "the running slot has no recorded boot carrier");
+            ensure!(held(&state, places.by_name, slot)? == Held::Recorded, "the boot carrier was overwritten");
+        }
+        Some(switching) => ensure!(switching.slot == suffix && (switching.to == Who::Installed || switching.saved), "the switch has no saved boot set for the running slot"),
+    }
+    state.switching = Some(Switching { to: Who::Installed, slot: suffix.into(), saved: true });
+    state.save(places.state)?;
+    finish(places, &mut state, None, None)
 }
 
 /// The other system's init_boot image as stored, made again with the
@@ -70,16 +115,22 @@ fn other_init_boot(places: &Places, state: &State) -> Result<Vec<u8>> {
     boot::with_program(&stored, system.own_ramdisk, &program, &system.start())
 }
 
-/// Finish the switch the state holds; `init_boot` is the other system's
-/// init_boot image where a switch to it made it already.
-fn finish(places: &Places, state: &mut State, init_boot: Option<Vec<u8>>) -> Result<()> {
+/// Finish the switch the state holds; `init_boot` and `carrier` are the
+/// other system's boot set where a switch to it made it already, as an
+/// init_boot image or as the whole boot image.
+fn finish(places: &Places, state: &mut State, init_boot: Option<Vec<u8>>, carrier: Option<Vec<u8>>) -> Result<()> {
     let switching = state.switching.clone().context("no switch to finish")?;
     let slot = Slot::from_suffix(&switching.slot).with_context(|| format!("the switch is to slot {:?}", switching.slot))?;
     let store = state.store.clone().context("no store holds the boot sets")?;
-    let init_boot = match (switching.to, init_boot) {
-        (Who::Other, Some(made)) => Some(made),
-        (Who::Other, None) => Some(other_init_boot(places, state)?),
-        (Who::Installed, _) => None,
+    let carrier = match (switching.to, carrier, store.init_boot == 0) {
+        (Who::Other, Some(made), true) => Some(made),
+        (Who::Other, None, true) => Some(carrier_boot_set(places, state, slot)?),
+        _ => None,
+    };
+    let init_boot = match (switching.to, init_boot, store.init_boot > 0) {
+        (Who::Other, Some(made), _) => Some(made),
+        (Who::Other, None, true) => Some(other_init_boot(places, state)?),
+        _ => None,
     };
     // While the installed system's boot set is the one in the partitions,
     // it is saved before the other's is written over it.
@@ -94,7 +145,11 @@ fn finish(places: &Places, state: &mut State, init_boot: Option<Vec<u8>>) -> Res
         Who::Installed => state.saved.clone().context("the installed system's boot set was never saved")?,
         Who::Other => state.system.as_ref().context("no other system is installed")?.set.clone(),
     };
-    let written = store::restore(&store, places.store, &set, places.by_name, slot, init_boot.as_deref()).with_context(|| format!("write the {:?} system's boot set", switching.to))?;
+    let written = match &carrier {
+        Some(image) => store::restore_carrier(&store, places.store, &set, places.by_name, slot, image),
+        None => store::restore(&store, places.store, &set, places.by_name, slot, init_boot.as_deref()),
+    }
+    .with_context(|| format!("write the {:?} system's boot set", switching.to))?;
     (state.occupied, state.written) = match switching.to {
         Who::Other => (Some(switching.slot.clone()), Some(written)),
         Who::Installed => (None, None),
@@ -158,12 +213,13 @@ pub fn held(state: &State, by_name: &Path, starts: Slot) -> Result<Held> {
 mod tests {
     use super::*;
     use crate::boot::tests::{entries, start, template};
-    use crate::boot::{INIT, START};
+    use crate::boot::{CARRIER, INIT, INIT_PROGRAM, START};
     use crate::state::tests::area;
     use crate::state::{Saved, System};
-    use crate::store::tests::bench;
+    use crate::store::tests::{bench, carrier_bench};
     use crate::store::{put, OTHER};
-    use skyward_bootimg::BootImage;
+    use sha2::{Digest, Sha256};
+    use skyward_bootimg::{BootImage, Format, Ramdisk};
     use std::path::PathBuf;
 
     struct Bench {
@@ -210,6 +266,7 @@ mod tests {
                 filesystem: "ext4".into(),
                 init: "/sbin/init".into(),
                 root: area("/data/skyward/systems/test", 1 << 20),
+                android: None,
                 set,
                 own_ramdisk: None,
                 vendor_boot: String::new(),
@@ -222,6 +279,65 @@ mod tests {
         let program = path.join("system-init");
         std::fs::write(&program, b"new program").unwrap();
         Bench { _dir: dir, dir: path, state: state_path, store: device, program }
+    }
+
+    #[test]
+    fn a_switch_to_the_other_system_writes_the_skyward_at_hand_into_its_boot_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let (store, device) = carrier_bench(&path);
+        // The other system's boot set as the Skyward that installed it made
+        // it, with that Skyward's program in it.
+        let mut rd = Ramdisk { entries: Vec::new() };
+        rd.add(crate::boot::RECOVERY, 0o750, b"second-stage init".to_vec()).unwrap();
+        rd.link("init", "system/bin/init").unwrap();
+        rd.add(INIT_PROGRAM, 0o750, b"old program".to_vec()).unwrap();
+        let installed = template(&rd.encode_as(Format::Gzip).unwrap());
+        let mut other = BootImage::parse(&template(b"stock")).unwrap();
+        other.kernel = b"other kernel".to_vec();
+        let other = other.to_bytes().unwrap();
+        let carrier = crate::boot::boot_carrier(&installed, &other, b"old program", &start()).unwrap();
+        let carrier = crate::footer::footed(&carrier, crate::store::BOOT, store.boot, &Sha256::digest(&carrier)).unwrap();
+        let set = put(&store, &device, OTHER, &mut &carrier[..], carrier.len() as u64, &[]).unwrap();
+        rd.replace(crate::boot::RECOVERY, b"updated second-stage init".to_vec()).unwrap();
+        let installed = template(&rd.encode_as(Format::Gzip).unwrap());
+        let installed = &installed[..store.boot as usize];
+        fs::write(path.join("boot_a"), installed).unwrap();
+        let state = State {
+            store: Some(store),
+            system: Some(System {
+                id: "test".into(),
+                name: "Test".into(),
+                version: "1".into(),
+                filesystem: "ext4".into(),
+                init: "/init".into(),
+                root: area("/data/skyward/systems/test", 1 << 20),
+                android: None,
+                set,
+                own_ramdisk: None,
+                vendor_boot: String::new(),
+                dtbo: String::new(),
+            }),
+            ..State::default()
+        };
+        let state_path = path.join("systems.toml");
+        state.save(&state_path).unwrap();
+        let program = path.join("system-init");
+        std::fs::write(&program, b"new program").unwrap();
+        let places = Places { state: &state_path, by_name: &path, store: &device, program: &program };
+        switch(&places, Slot::A, Who::Other).unwrap();
+        let written = std::fs::read(path.join("boot_a")).unwrap();
+        assert_eq!(&written[written.len() - 64..written.len() - 60], b"AVBf", "a boot partition image of its own");
+        let back = BootImage::parse(&written).unwrap();
+        let rd = Ramdisk::decode(&back.ramdisk).unwrap();
+        assert_eq!(rd.find(INIT_PROGRAM).unwrap().data, b"new program", "the Skyward at hand, in place of the one installed with it");
+        assert!(rd.find(CARRIER).is_some(), "and the recovery still in the ramdisk");
+        assert_eq!(rd.find(crate::boot::RECOVERY).unwrap().data, b"updated second-stage init", "from the current recovery");
+        assert_eq!(std::fs::read(path.join("boot_b")).unwrap(), vec![0xb1; 65536], "the other slot left alone");
+        assert!(roll_back_carrier(&places, Slot::B).is_err(), "Recovery cannot write another slot");
+        roll_back_carrier(&places, Slot::A).unwrap();
+        assert_eq!(std::fs::read(path.join("boot_a")).unwrap(), installed, "back to the installed system's boot set");
+        assert!(State::load(&state_path).unwrap().occupied.is_none());
     }
 
     #[test]

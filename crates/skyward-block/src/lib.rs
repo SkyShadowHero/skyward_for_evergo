@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 pub mod area;
 pub mod dm;
 pub mod erase;
+#[cfg(target_os = "android")]
+pub mod ext4;
 pub mod fsck;
 pub mod fstab;
+pub mod labels;
 pub mod loopdev;
 pub mod mount;
 pub mod probe;

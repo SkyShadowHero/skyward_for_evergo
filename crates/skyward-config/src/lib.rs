@@ -87,6 +87,35 @@ pub struct DeviceConfig {
     /// The stock build the recovery is made on.
     #[serde(default)]
     pub stock: Option<Stock>,
+    /// What the phone keeps of a second system beside the installed one,
+    /// on phones whose boot chain differs from the one Skyward writes for
+    /// by default.
+    #[serde(default)]
+    pub dual_boot: Option<DualBoot>,
+}
+
+/// What a phone keeps of the systems the bootloader starts: the first
+/// ramdisk of each, which Skyward writes the second system's start into.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct DualBoot {
+    /// Where the first ramdisk of a system is kept.
+    #[serde(default)]
+    pub first_ramdisk: FirstRamdisk,
+}
+
+/// Where the first ramdisk of a system the bootloader starts is kept.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstRamdisk {
+    /// In an init_boot partition of the slot that starts, as phones with one
+    /// keep it, beside the kernel in boot.
+    #[default]
+    InitBoot,
+    /// In the boot partition, beside the kernel, as phones whose boot image
+    /// the bootloader unpacks for the recovery as well keep it: there the
+    /// same image starts the system and Skyward, which tells the two apart
+    /// by the start the bootloader makes.
+    Boot,
 }
 
 /// The stock build a recovery is made on: the phone maker's full update
@@ -1038,5 +1067,21 @@ mod tests {
         assert!(!report.uses(Path::new("/vendor")));
         let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
         assert!(nezha.services[0].uses(Path::new("/vendor")), "its shell and its libraries are the vendor partition's");
+    }
+
+    #[test]
+    fn a_phone_whose_boot_image_holds_the_first_ramdisk_says_so() {
+        let evergo = DeviceConfig::parse(include_str!("../../../devices/evergo.toml")).unwrap();
+        assert_eq!(evergo.dual_boot, Some(DualBoot { first_ramdisk: FirstRamdisk::Boot }), "no init_boot and no recovery partition: the boot image holds both");
+        let nezha = DeviceConfig::parse(include_str!("../../../devices/nezha.toml")).unwrap();
+        assert_eq!(nezha.dual_boot, None, "a phone with init_boot partitions takes them as they are");
+        let boot = "[device]\ncodename = \"x\"\n[dual_boot]\nfirst_ramdisk = \"boot\"\n";
+        assert_eq!(DeviceConfig::parse(boot).unwrap().dual_boot, Some(DualBoot { first_ramdisk: FirstRamdisk::Boot }));
+        assert_eq!(DeviceConfig::parse("[device]\ncodename = \"x\"\n[dual_boot]\n").unwrap().dual_boot, Some(DualBoot::default()));
+        assert_eq!(DualBoot::default().first_ramdisk, FirstRamdisk::InitBoot, "the layout of every other phone");
+        for elsewhere in ["recovery", "vendor_boot", "boot_a", ""] {
+            let text = format!("[device]\ncodename = \"x\"\n[dual_boot]\nfirst_ramdisk = \"{elsewhere}\"\n");
+            assert!(DeviceConfig::parse(&text).is_err(), "{elsewhere} is no partition Skyward writes a first ramdisk to");
+        }
     }
 }

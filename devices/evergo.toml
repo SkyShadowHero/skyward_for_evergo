@@ -156,3 +156,13 @@ strength = { lightest = 0.25, strongest = 0.75 }
 # for the camera's flash, not switches: writing them lights nothing.
 [flashlight]
 path = "/sys/devices/platform/flashlights_mt6360/torch_brightness"
+
+# The second system beside the installed one: the phone has neither an
+# init_boot partition nor a recovery partition of its own. Its boot image
+# holds the kernel and the first ramdisk together, and the bootloader
+# unpacks that ramdisk for the recovery too, saying with
+# androidboot.force_normal_boot=1 which kind of start it made. Skyward makes
+# the second system's boot set out of the other system's kernel and the
+# installed system's own first ramdisk, with its own first program in it.
+[dual_boot]
+first_ramdisk = "boot"

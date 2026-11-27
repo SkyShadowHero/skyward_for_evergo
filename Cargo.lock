@@ -2748,6 +2748,7 @@ dependencies = [
  "skyward-modules",
  "skyward-sys",
  "skyward-systems",
+ "skyward-vab",
 ]
 
 [[package]]

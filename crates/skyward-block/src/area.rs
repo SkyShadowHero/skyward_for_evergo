@@ -370,19 +370,26 @@ mod sys {
         /// Let the file go: no longer immutable, then deleted, and its
         /// blocks are the filesystem's again.
         pub fn remove(&self) -> Result<()> {
-            let f = match File::open(&self.file) {
-                Ok(f) => f,
-                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-                Err(e) => return Err(e).with_context(|| format!("open {}", self.file.display())),
-            };
-            set_flags(&f, flags(&f)? & !FS_IMMUTABLE_FL)?;
-            fs::remove_file(&self.file).with_context(|| format!("delete {}", self.file.display()))
+            remove_file(&self.file)
         }
+    }
+
+    /// Release the file of an area, including an allocation interrupted
+    /// before the area could be recorded.
+    pub fn remove_file(path: &Path) -> Result<()> {
+        let f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+        };
+        ensure!(f.metadata()?.is_file(), "{} is not an area file", path.display());
+        set_flags(&f, flags(&f)? & !FS_IMMUTABLE_FL)?;
+        fs::remove_file(path).with_context(|| format!("delete {}", path.display()))
     }
 }
 
 #[cfg(target_os = "android")]
-pub use sys::create;
+pub use sys::{create, remove_file};
 
 #[cfg(test)]
 mod tests {

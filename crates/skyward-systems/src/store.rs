@@ -122,6 +122,18 @@ pub fn check(store: &Store, device: &Path, saved: &Saved) -> Result<()> {
     Ok(())
 }
 
+/// The boot image of the boot set `saved` names, once the store is found to
+/// hold it whole, with the zeros after it to its partition's size.
+pub fn boot(store: &Store, device: &Path, saved: &Saved) -> Result<Vec<u8>> {
+    let mut f = open(device, false)?;
+    skyward_block::drop_cache(&f)?;
+    f.seek(SeekFrom::Start(store.offset(saved.entry)))?;
+    let mut image = vec![0u8; store.boot as usize];
+    f.read_exact(&mut image).with_context(|| format!("read {}", device.display()))?;
+    ensure!(hex::encode(Sha256::digest(&image)) == saved.boot, "the store's entry {} holds another boot image than was saved", saved.entry);
+    Ok(image)
+}
+
 /// The init_boot image of the boot set `saved` names, once the store is
 /// found to hold it whole, with the zeros after it to its partition's size.
 pub fn init_boot(store: &Store, device: &Path, saved: &Saved) -> Result<Vec<u8>> {
@@ -176,6 +188,23 @@ pub fn restore(store: &Store, device: &Path, saved: &Saved, dir: &Path, slot: Sl
     Ok(Written { boot: sums[0].clone(), init_boot: sums.get(1).cloned().unwrap_or_default() })
 }
 
+/// Write `image`, the boot set made again, into the boot partition of
+/// `slot`, once the stored set it was made from is found whole, and read it
+/// back; gives what the partition holds once written. The store keeps the
+/// set as it was installed, as the other system's init_boot image is kept
+/// on other phones: each switch writes the program at hand over it.
+pub fn restore_carrier(store: &Store, device: &Path, saved: &Saved, dir: &Path, slot: Slot, image: &[u8]) -> Result<Written> {
+    check(store, device, saved)?;
+    ensure!(image.len() as u64 <= store.boot, "the boot image takes {} bytes, more than the {} of the boot partition", image.len(), store.boot);
+    let path = partition(dir, BOOT, slot);
+    let mut out = open(&path, true)?;
+    let mut padded = image.chain(io::repeat(0).take(store.boot - image.len() as u64));
+    let written = copy(&mut padded, &mut out, store.boot).with_context(|| format!("write {}", path.display()))?;
+    out.sync_all().with_context(|| format!("sync {}", path.display()))?;
+    ensure!(sum(&mut out, 0, store.boot)? == written, "{} reads back different from what was written", path.display());
+    Ok(Written { boot: written, init_boot: String::new() })
+}
+
 /// Write a boot set made up of `boot`, `boot_len` bytes, and `init_boot`
 /// into `entry` of the store, each followed by zeros to its partition's
 /// size, and read the entry back.
@@ -208,6 +237,32 @@ pub(crate) mod tests {
             std::fs::write(dir.join(name), vec![fill; len]).unwrap();
         }
         (store, device)
+    }
+
+    /// A store over a file the size it takes, with one 64 KiB boot
+    /// partition of each slot and no init_boot partition, as a phone whose
+    /// boot image holds the kernel and the first ramdisk together has.
+    pub fn carrier_bench(dir: &Path) -> (Store, PathBuf) {
+        let store = Store { area: area("/data/skyward/systems/store", Store::size_for(65536, 0)), boot: 65536, init_boot: 0 };
+        let device = dir.join("store");
+        std::fs::write(&device, vec![0u8; store.area.size as usize]).unwrap();
+        for (name, fill) in [("boot_a", 0xa1u8), ("boot_b", 0xb1u8)] {
+            std::fs::write(dir.join(name), vec![fill; 65536]).unwrap();
+        }
+        (store, device)
+    }
+
+    #[test]
+    fn a_boot_image_of_a_boot_set_comes_back_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, device) = carrier_bench(dir.path());
+        let image: Vec<u8> = (0..65536u32).map(|i| i as u8).collect();
+        let saved = put(&store, &device, OTHER, &mut &image[..], image.len() as u64, &[]).unwrap();
+        assert_eq!(boot(&store, &device, &saved).unwrap(), image);
+        let mut bytes = std::fs::read(&device).unwrap();
+        bytes[store.offset(OTHER) as usize + 10] ^= 1;
+        std::fs::write(&device, bytes).unwrap();
+        assert!(boot(&store, &device, &saved).is_err(), "a damaged boot image is not read");
     }
 
     #[test]

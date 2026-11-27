@@ -18,7 +18,7 @@ use crate::wlan;
 use anyhow::{anyhow, ensure, Context, Result};
 use skyward_block::fsck::Fixed;
 use skyward_block::{fstab, mount, probe};
-use skyward_config::{DeviceConfig, Service};
+use skyward_config::{DeviceConfig, FirstRamdisk, Service};
 use skyward_crypto::data::{Closed, Opened};
 use skyward_install::asked::{self, Needs};
 use skyward_install::{Detach, Installer, Options};
@@ -1400,11 +1400,20 @@ impl<'a> Pages<'a> {
         // Skyward lives in a recovery partition of each slot where the phone
         // has them, and the install page then offers to keep it there. Such a
         // phone holds a second system where it also has boot and init_boot
-        // partitions in both slots, which a switch writes.
+        // partitions in both slots, which a switch writes; a phone whose boot
+        // image holds the kernel and the first ramdisk together needs neither
+        // a recovery partition nor an init_boot one, its boot partition
+        // holding both systems' first ramdisks in turn, as its device
+        // configuration says.
         let by_name = Path::new(skyward_block::BY_NAME);
         let both = |base: &str| -> Result<bool> { Ok(by_name.join(format!("{base}_a")).try_exists()? && by_name.join(format!("{base}_b")).try_exists()?) };
         app.state.recovery_partitions = both("recovery")?;
-        app.state.dual_boot = app.state.recovery_partitions && both("boot")? && both("init_boot")?;
+        let first_ramdisk_in_boot = cfg.dual_boot.is_some_and(|dual| dual.first_ramdisk == FirstRamdisk::Boot);
+        app.state.dual_boot = if first_ramdisk_in_boot {
+            both("boot")?
+        } else {
+            app.state.recovery_partitions && both("boot")? && both("init_boot")?
+        };
         // The second system's work; the systems are read at once, for the home
         // page to name the one that starts, once a switch cut off before is
         // finished.

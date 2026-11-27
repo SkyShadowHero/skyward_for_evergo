@@ -24,3 +24,4 @@ skyward-bootimg = { path = "../skyward-bootimg" }
 skyward-modules = { path = "../skyward-modules" }
 skyward-sys = { path = "../skyward-sys" }
 skyward-systems = { path = "../skyward-systems" }
+skyward-vab = { path = "../skyward-vab" }

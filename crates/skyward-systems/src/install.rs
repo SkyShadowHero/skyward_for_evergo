@@ -72,6 +72,10 @@ impl Store {
 pub use sys::*;
 
 #[cfg(target_os = "android")]
+#[path = "root_labels.rs"]
+mod root_labels;
+
+#[cfg(target_os = "android")]
 mod sys {
     use super::*;
     use crate::boot::{self, Start};
@@ -83,10 +87,11 @@ mod sys {
     use anyhow::{ensure, Context};
     use sha2::{Digest, Sha256};
     use skyward_block::area::{self, Area};
-    use skyward_block::{dm, BY_NAME};
+    use skyward_block::{dm, mount, BY_NAME};
     use skyward_vab::Slot;
     use std::fs::{self, File, OpenOptions};
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+    use std::os::unix::fs::FileExt;
     use std::path::{Path, PathBuf};
     use zip::ZipArchive;
 
@@ -111,9 +116,23 @@ mod sys {
     /// The room for a root, in the data partition as it is now.
     pub fn room_now(slot: Slot) -> Result<u64> {
         let state = state()?;
-        let size = |name: &str| skyward_block::size_bytes(store::partition(by_name(), name, slot));
-        let needed = Store::needed(&state, size(store::BOOT)?, size(store::INIT_BOOT)?);
+        let init_boot = partition_bytes(store::INIT_BOOT, slot)?.unwrap_or(0);
+        let mut needed = Store::needed(&state, partition_bytes(store::BOOT, slot)?.context("the phone has no boot partition")?, init_boot);
+        if init_boot == 0 {
+            needed += boot::ANDROID_AREA_BYTES;
+        }
         Ok(room(free()?, needed, skyward_block::size_bytes(by_name().join("super"))?))
+    }
+
+    /// The bytes of the partition `name` of `slot`, where the phone has it:
+    /// a phone whose boot image holds the kernel and the first ramdisk
+    /// together has no init_boot partition, and none is needed.
+    fn partition_bytes(name: &str, slot: Slot) -> Result<Option<u64>> {
+        let path = store::partition(by_name(), name, slot);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(skyward_block::size_bytes(&path).with_context(|| format!("read the size of {}", path.display()))?))
     }
 
     /// Lay the store out as a device, once it is found where it was, run
@@ -172,14 +191,107 @@ mod sys {
     /// waits for any update to be merged, and first checks that the other
     /// system's root is still where it was put.
     pub fn switch_to(next: Slot, to: Who) -> Result<()> {
-        let state = state()?;
-        if to == Who::Other {
-            let update = skyward_vab::snapshot_state()?;
-            ensure!(update == skyward_vab::SnapshotState::None, "an update is in flight ({update:?}), and the installed system has to start once more to merge it");
-            state.system.as_ref().context("no other system is installed")?.root.check_header()?;
-        }
         let (path, program) = (Path::new(PATH), program());
-        writable(|| with_store(&state, |device| switch::switch(&Places { state: path, by_name: by_name(), store: device, program: &program }, next, to)))
+        writable(|| {
+            let mut state = State::load(path)?;
+            if to == Who::Other {
+                let update = skyward_vab::snapshot_state()?;
+                ensure!(update == skyward_vab::SnapshotState::None, "an update is in flight ({update:?}), and the installed system has to start once more to merge it");
+                ensure!(state.switching.is_none() && state.occupied.is_none(), "a switch is already in progress or the other system is already active");
+                state.system.as_ref().context("no other system is installed")?.root.check_header()?;
+                if state.store.as_ref().is_some_and(|store| store.init_boot == 0) {
+                    prepare_android(&mut state, path)?;
+                }
+            }
+            with_store(&state, |device| switch::switch(&Places { state: path, by_name: by_name(), store: device, program: &program }, next, to))
+        })
+    }
+
+    /// Work on a slice of an area through its own block device.
+    fn with_area<T>(area: &Area, name: &str, from: u64, len: u64, ro: bool, work: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        let dev = skyward_block::devnum(by_name().join(&area.partition))?;
+        let node = dm::create(name, &area.targets(from, len, dev)?, ro)?;
+        let result = work(&node);
+        let gone = dm::remove(name);
+        let result = result?;
+        gone?;
+        Ok(result)
+    }
+
+    fn with_mount<T>(node: &Path, point: &Path, filesystem: &str, options: &[String], work: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        fs::create_dir_all(point)?;
+        mount::mount(node, point, filesystem, options)?;
+        let result = work(point);
+        let unmounted = mount::umount(point);
+        let result = result?;
+        unmounted?;
+        Ok(result)
+    }
+
+    /// Provision Android storage during the first switch, including for
+    /// installations that predate it. The journal identifies only an
+    /// unpublished allocation; a saved area is never formatted again.
+    fn prepare_android(state: &mut State, path: &Path) -> Result<()> {
+        let system = state.system.as_ref().context("no other system is installed")?;
+        if let Some(area) = &system.android {
+            area.check_header()?;
+            return with_area(area, "skyward-android-meta", HEADER, boot::ANDROID_METADATA_BYTES, false, |node| {
+                with_mount(node, Path::new("/tmp/skyward-android-meta"), "ext4", &[], |root| {
+                    let marker = root.join(boot::ANDROID_BOOT_MARKER);
+                    match fs::remove_file(&marker) {
+                        Ok(()) => File::open(marker.parent().expect("the marker has a parent"))?.sync_all().map_err(Into::into),
+                        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                        Err(e) => Err(e).with_context(|| format!("reset {}", marker.display())),
+                    }
+                })
+            });
+        }
+        let mut options = vec!["ro".into()];
+        if system.filesystem == "ext4" {
+            options.push("noload".into());
+        }
+        let android = with_area(&system.root, ROOT_DEVICE, HEADER, system.root.size - HEADER, false, |node| {
+            let (android, labels) = with_mount(node, Path::new("/tmp/skyward-android-root"), &system.filesystem, &options, |root| {
+                let android = boot::android_root(root, &system.init);
+                let labels = if android && system.filesystem == "ext4" { root_labels::missing(root)? } else { None };
+                Ok((android, labels))
+            })?;
+            if let Some((labels, init)) = labels {
+                skyward_block::ext4::label(node, &labels, init)?;
+            }
+            Ok(android)
+        })?;
+        if !android {
+            return Ok(());
+        }
+        ensure!(mount::is_mount_point(data())?, "open the installed system's data to make room for the second system's private data");
+        let file = Path::new(FOLDER).join(format!("{}.android", system.id));
+        let dir = path.parent().expect("the state has a parent");
+        let pending = dir.join(format!("{}.android-pending", system.id));
+        if pending.try_exists()? {
+            area::remove_file(&file)?;
+        } else {
+            ensure!(!file.try_exists()?, "{} exists without a recorded area", file.display());
+            File::create_new(&pending)?.sync_all()?;
+            File::open(dir)?.sync_all()?;
+        }
+        let needed = boot::ANDROID_AREA_BYTES + skyward_block::size_bytes(by_name().join("super"))?;
+        ensure!(free()? >= needed, "not enough room for the second system's 16 GiB data and the installed system's updates");
+        let area = area::create(&file, boot::ANDROID_AREA_BYTES, &mut |_, _| {})?;
+        with_area(&area, "skyward-android-meta", HEADER, boot::ANDROID_METADATA_BYTES, false, |node| skyward_block::erase::make(node, "ext4", &[], false))?;
+        with_area(&area, "skyward-android-data", HEADER + boot::ANDROID_METADATA_BYTES, boot::ANDROID_DATA_BYTES, false, |node| {
+            // fs_mgr recognizes a blank block device and lets vold format it
+            // under its own metadata encryption key on the first start.
+            let file = OpenOptions::new().write(true).open(node)?;
+            file.write_all_at(&vec![0; 1 << 20], 0)?;
+            file.sync_all()?;
+            Ok(())
+        })?;
+        state.system.as_mut().expect("the installed second system").android = Some(area);
+        state.save(path)?;
+        fs::remove_file(&pending)?;
+        File::open(dir)?.sync_all()?;
+        Ok(())
     }
 
     /// Finish a switch cut off before, where one was; says whether there
@@ -236,10 +348,17 @@ mod sys {
         Ok(hex::encode(sum.finalize()))
     }
 
-    /// Whether the installed system's vendor_boot or dtbo in `slot` differ
-    /// from when the other system was installed.
+    /// Whether the installed system's kernel side in `slot` differs from
+    /// when the other system was installed. On a phone whose boot image
+    /// holds the first ramdisk, the other system's boot set keeps its own
+    /// copy of that ramdisk and its own kernel, and starts with none of the
+    /// installed system's vendor_boot or dtbo: there is nothing of them to
+    /// have changed.
     pub fn changed(state: &State, slot: Slot) -> Result<bool> {
         let Some(system) = &state.system else { return Ok(false) };
+        if state.store.as_ref().is_none_or(|store| store.init_boot == 0) {
+            return Ok(false);
+        }
         Ok(sum_of(&store::partition(by_name(), "vendor_boot", slot))? != system.vendor_boot
             || sum_of(&store::partition(by_name(), "dtbo", slot))? != system.dtbo)
     }
@@ -248,8 +367,9 @@ mod sys {
     /// `contents`, with a root of `size` bytes: its root written into a
     /// new area of the data partition, which has to be open, and its boot
     /// set, with `program` to start it, put in the store, made where there
-    /// is none yet. `slot` is the slot the phone runs from, whose
-    /// init_boot image lends its header.
+    /// is none yet. `slot` is the slot the phone runs from, whose init_boot
+    /// image, or whose boot image where the first ramdisk is kept in it,
+    /// lends the header.
     pub fn install<R: Read + Seek>(zip: &mut ZipArchive<R>, contents: &Contents, size: u64, program: &[u8], slot: Slot, progress: &mut dyn FnMut(Step)) -> Result<()> {
         writable(|| install_now(zip, contents, size, program, slot, progress))
     }
@@ -265,7 +385,8 @@ mod sys {
         let folder = Path::new(FOLDER);
         fs::create_dir_all(folder).with_context(|| format!("make {}", folder.display()))?;
         if state.store.is_none() {
-            let (boot, init_boot) = (skyward_block::size_bytes(store::partition(by_name(), store::BOOT, slot))?, skyward_block::size_bytes(store::partition(by_name(), store::INIT_BOOT, slot))?);
+            let boot = partition_bytes(store::BOOT, slot)?.context("the phone has no boot partition")?;
+            let init_boot = partition_bytes(store::INIT_BOOT, slot)?.unwrap_or(0);
             let area = area::create(&folder.join("store"), Store::size_for(boot, init_boot), &mut |done, total| progress(Step::Allocating { done, total }))?;
             state.store = Some(Store { area, boot, init_boot });
             state.save(path)?;
@@ -276,21 +397,40 @@ mod sys {
         let made = (|| -> Result<System> {
             write_root(zip, &root, contents.root, progress)?;
             progress(Step::Finishing);
-            let start = Start { id: id.clone(), filesystem: contents.manifest.filesystem.clone(), init: contents.manifest.init.clone(), root: root.clone() };
-            let (init_boot, own_ramdisk) = match contents.init_boot {
-                true => {
-                    let mut own = Vec::new();
-                    zip.by_name(INIT_BOOT).context("open init_boot.img")?.read_to_end(&mut own).context("read init_boot.img")?;
-                    let (image, own_ramdisk) = boot::with_start(&own, program, &start)?;
-                    (image, Some(own_ramdisk))
+            let start = Start { id: id.clone(), filesystem: contents.manifest.filesystem.clone(), init: contents.manifest.init.clone(), root: root.clone(), android: None };
+            let store = state.store.as_ref().expect("made above");
+            let (set, own_ramdisk) = match store.init_boot {
+                // The phone's boot image holds the kernel and the first
+                // ramdisk together: the other system's kernel is joined to
+                // the installed system's own ramdisk, whose first program
+                // becomes Skyward's, and the whole boot image is kept.
+                0 => {
+                    ensure!(!contents.init_boot, "the phone's boot image holds the first ramdisk, and cannot start a system that brings one of its own");
+                    let installed = fs::read(store::partition(by_name(), store::BOOT, slot)).context("read the installed system's boot image")?;
+                    let mut other = Vec::with_capacity(usize::try_from(contents.boot).context("boot.img size")?);
+                    zip.by_name(BOOT).context("open boot.img")?.read_to_end(&mut other).context("read boot.img")?;
+                    let image = boot::boot_carrier(&installed, &other, program, &start)?;
+                    let image = crate::footer::footed(&image, store::BOOT, store.boot, &Sha256::digest(&image))?;
+                    let set = with_store(&state, |device| store::put(store, device, OTHER, &mut &image[..], image.len() as u64, &[]))?;
+                    (set, None)
                 }
-                false => (boot::init_boot(&fs::read(store::partition(by_name(), store::INIT_BOOT, slot)).context("read the phone's init_boot")?, program, &start)?, None),
+                _ => {
+                    let (init_boot, own_ramdisk) = match contents.init_boot {
+                        true => {
+                            let mut own = Vec::new();
+                            zip.by_name(INIT_BOOT).context("open init_boot.img")?.read_to_end(&mut own).context("read init_boot.img")?;
+                            let (image, own_ramdisk) = boot::with_start(&own, program, &start)?;
+                            (image, Some(own_ramdisk))
+                        }
+                        false => (boot::init_boot(&fs::read(store::partition(by_name(), store::INIT_BOOT, slot)).context("read the phone's init_boot")?, program, &start)?, None),
+                    };
+                    let set = with_store(&state, |device| {
+                        let mut image = zip.by_name(BOOT).context("open boot.img")?;
+                        store::put(store, device, OTHER, &mut image, contents.boot, &init_boot)
+                    })?;
+                    (set, own_ramdisk)
+                }
             };
-            let set = with_store(&state, |device| {
-                let mut image = zip.by_name(BOOT).context("open boot.img")?;
-                let store = state.store.as_ref().expect("made above");
-                store::put(store, device, OTHER, &mut image, contents.boot, &init_boot)
-            })?;
             Ok(System {
                 id: id.clone(),
                 name: contents.manifest.name.clone(),
@@ -298,10 +438,17 @@ mod sys {
                 filesystem: contents.manifest.filesystem.clone(),
                 init: contents.manifest.init.clone(),
                 root: root.clone(),
+                android: None,
                 set,
                 own_ramdisk,
-                vendor_boot: sum_of(&store::partition(by_name(), "vendor_boot", slot))?,
-                dtbo: sum_of(&store::partition(by_name(), "dtbo", slot))?,
+                vendor_boot: match store.init_boot {
+                    0 => String::new(),
+                    _ => sum_of(&store::partition(by_name(), "vendor_boot", slot))?,
+                },
+                dtbo: match store.init_boot {
+                    0 => String::new(),
+                    _ => sum_of(&store::partition(by_name(), "dtbo", slot))?,
+                },
             })
         })();
         match made {
@@ -367,6 +514,14 @@ mod sys {
             let path = Path::new(PATH);
             let mut state = State::load(path)?;
             if let Some(system) = &state.system {
+                if let Some(area) = &system.android {
+                    area.remove()?;
+                }
+                let pending = path.with_file_name(format!("{}.android-pending", system.id));
+                if pending.try_exists()? {
+                    area::remove_file(&Path::new(FOLDER).join(format!("{}.android", system.id)))?;
+                    fs::remove_file(pending)?;
+                }
                 system.root.remove()?;
                 state.system = None;
                 state.save(path)?;

@@ -23,6 +23,12 @@
 //!
 //! Started as `map`, it only lays the root out and says where, for a
 //! system that brings a first ramdisk of its own.
+//!
+//! On a phone whose boot partition holds the kernel and the first ramdisk
+//! together, the kernel starts this program there too, and the bootloader's
+//! `androidboot.force_normal_boot=1` says whether the start is the system's:
+//! where it is, the start goes on as it does here; where it is not, the
+//! saved boot image is restored so Recovery next starts with its own kernel.
 
 // What reads the request and the kernel's files serves the phone and the
 // host tests.
@@ -66,6 +72,14 @@ fn stalled(during: &str, secs: u64, loading: &[String]) -> String {
     }
 }
 
+/// Whether the bootloader said the start it made is the system's: a phone
+/// whose boot image holds the kernel and the first ramdisk together says so
+/// with `androidboot.force_normal_boot=1`, where the kernel reads that, and
+/// starts the recovery otherwise.
+fn normal_boot(cmdline: &str, bootconfig: &str) -> bool {
+    bootconfig.contains("androidboot.force_normal_boot = \"1\"") || cmdline.contains("androidboot.force_normal_boot=1")
+}
+
 /// The device a uevent file describes: its name, the partition name it
 /// carries, and its (major, minor).
 fn uevent(text: &str) -> Result<(String, Option<String>, (u32, u32))> {
@@ -101,13 +115,15 @@ fn main() {
 
 #[cfg(target_os = "android")]
 mod sys {
-    use super::{loading, reason, stalled, uevent};
+    mod carrier_boot;
+
+    use super::{loading, normal_boot, reason, stalled, uevent};
     use anyhow::{bail, ensure, Context, Result};
     use skyward_block::area::HEADER;
     use skyward_block::{dm, BY_NAME};
     use skyward_bootimg::{BootImage, Ramdisk};
     use skyward_sys::bcb::{self, Bcb};
-    use skyward_systems::boot::{Start, INIT, START};
+    use skyward_systems::boot::{self, Start, INIT, RECOVERY, START};
     use std::ffi::CString;
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
@@ -246,6 +262,31 @@ mod sys {
         Ok(())
     }
 
+    /// Whether this program is the kernel's first one on a phone whose boot
+    /// image holds the kernel and the first ramdisk together, as the boot
+    /// partition of such a phone does: the ramdisk it is in says so with
+    /// [`boot::CARRIER`], and carries the recovery's own first program.
+    fn carrier() -> bool {
+        Path::new("/").join(boot::CARRIER).exists()
+    }
+
+    /// Become the recovery's own first program, the second-stage init of the
+    /// ramdisk the kernel unpacked, as the bootloader's recovery start runs
+    /// it when the installed system's own boot image is in the boot
+    /// partition.
+    fn recovery_in_place() -> Result<!> {
+        let program = format!("/{RECOVERY}");
+        ensure!(Path::new(&program).exists(), "the ramdisk the kernel unpacked holds no {program} to bring the recovery up from");
+        log(&format!("the bootloader made a recovery start, and {program} takes over in this program's place"));
+        exec(&program)
+    }
+
+    fn carrier_normal_boot() -> Result<bool> {
+        let cmdline = fs::read_to_string("/proc/cmdline").context("read /proc/cmdline")?;
+        let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
+        Ok(normal_boot(&cmdline, &bootconfig))
+    }
+
     /// The standard streams, which the kernel gives the first program only
     /// where the ramdisk has a console: nothing to read, and what is
     /// written goes to the kernel's log. Otherwise the files opened next
@@ -298,17 +339,20 @@ mod sys {
         node(DEVICE_MAPPER, libc::S_IFCHR, 0o600, (major.parse()?, minor.parse()?))
     }
 
-    /// Wait up to `within` for the partition named `name` to show, and make
-    /// its node at `at`; returns its (major, minor).
-    fn partition(name: &str, at: &str, within: Duration) -> Result<(u32, u32)> {
+    /// Wait up to `within` for a partition and return its kernel name and
+    /// device numbers.
+    fn partition_info(name: &str, within: Duration) -> Result<(String, (u32, u32))> {
         let start = Instant::now();
         loop {
             for entry in fs::read_dir("/sys/class/block").context("read /sys/class/block")? {
                 let path = entry?.path().join("uevent");
-                let (_, partname, dev) = uevent(&fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)?;
-                if partname.as_deref() == Some(name) {
-                    node(at, libc::S_IFBLK, 0o600, dev)?;
-                    return Ok(dev);
+                let text = match fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+                };
+                if let Ok((devname, Some(partname), dev)) = uevent(&text) && partname == name {
+                    return Ok((devname, dev));
                 }
             }
             if start.elapsed() > within {
@@ -316,6 +360,12 @@ mod sys {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn partition(name: &str, at: &str, within: Duration) -> Result<(u32, u32)> {
+        let (_, dev) = partition_info(name, within)?;
+        node(at, libc::S_IFBLK, 0o600, dev)?;
+        Ok(dev)
     }
 
     /// The node of the partition `name` among the links [`BY_NAME`] holds,
@@ -328,17 +378,22 @@ mod sys {
     /// Lay the root `start` names out as a device, once its area is found
     /// still to start with its header; returns the device's node.
     fn root(start: &Start) -> Result<&'static str> {
-        let at = format!("/dev/block/{}", start.root.partition);
-        let device = partition(&start.root.partition, &at, PARTITION_TIMEOUT)?;
-        device_mapper()?;
-        let f = File::open(&at).with_context(|| format!("open {at}"))?;
-        let mut header = vec![0u8; HEADER as usize];
-        f.read_exact_at(&mut header, start.root.extents[0].0).with_context(|| format!("read {at}"))?;
-        start.root.check(&header)?;
-        let targets = start.root.targets(HEADER, start.root.size - HEADER, device)?;
-        let dev = dm::activate(ROOT_DEVICE, &targets, false)?;
-        node(ROOT_NODE, libc::S_IFBLK, 0o600, dev)?;
+        let at = if carrier() { carrier_boot::BACKING.to_string() } else { format!("/dev/block/{}", start.root.partition) };
+        map_area(&start.root, &at, ROOT_DEVICE, ROOT_NODE, HEADER, start.root.size - HEADER, false)?;
         Ok(ROOT_NODE)
+    }
+
+    fn map_area(area: &skyward_block::area::Area, at: &str, name: &str, mapped: &str, from: u64, len: u64, read_only: bool) -> Result<(u32, u32)> {
+        let device = partition(&area.partition, at, PARTITION_TIMEOUT)?;
+        device_mapper()?;
+        let f = File::open(at).with_context(|| format!("open {at}"))?;
+        let mut header = vec![0u8; HEADER as usize];
+        let &(offset, _) = area.extents.first().context("the area has no extents")?;
+        f.read_exact_at(&mut header, offset).with_context(|| format!("read {at}"))?;
+        area.check(&header)?;
+        let dev = dm::activate(name, &area.targets(from, len, device)?, read_only)?;
+        node(mapped, libc::S_IFBLK, 0o600, dev)?;
+        Ok(dev)
     }
 
     fn read_start() -> Result<Start> {
@@ -378,9 +433,28 @@ mod sys {
         Err(std::io::Error::last_os_error()).with_context(|| format!("start {program}"))
     }
 
+    /// Become `program` with `args`, as the kernel starts a program: the
+    /// arguments are the ones the first stage of an Android system starts
+    /// the second with.
+    fn exec_args(program: &str, args: &[&str]) -> Result<!> {
+        let path = c(program);
+        let args: Vec<CString> = args.iter().map(|arg| c(arg)).collect();
+        let mut argv: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
+        argv.push(std::ptr::null());
+        unsafe { libc::execv(path.as_ptr(), argv.as_ptr()) };
+        Err(std::io::Error::last_os_error()).with_context(|| format!("start {program} with {args:?}"))
+    }
+
     /// Go over to the root mounted at [`NEW_ROOT`], the kernel's
     /// filesystems taken along, and become the system's own first program.
     fn hand_over(init: &str) -> Result<!> {
+        go_over_into_root()?;
+        exec(init)
+    }
+
+    /// Go over to the root mounted at [`NEW_ROOT`], the kernel's own
+    /// filesystems taken along.
+    fn go_over_into_root() -> Result<()> {
         for dir in ["/dev", "/proc", "/sys"] {
             let to = format!("{NEW_ROOT}{dir}");
             if Path::new(&to).is_dir() {
@@ -392,8 +466,84 @@ mod sys {
         check(unsafe { libc::chdir(c(NEW_ROOT).as_ptr()) }, || format!("go into {NEW_ROOT}"))?;
         mount(".", "/", None, libc::MS_MOVE, None)?;
         check(unsafe { libc::chroot(c(".").as_ptr()) }, || "make the new root the root".into())?;
-        check(unsafe { libc::chdir(c("/").as_ptr()) }, || "go to the new root".into())?;
-        exec(init)
+        check(unsafe { libc::chdir(c("/").as_ptr()) }, || "go to the new root".into())
+    }
+
+    /// What the first stage of an Android system sets up before it goes on to
+    /// the second one, on a phone whose boot partition holds the kernel and
+    /// the first ramdisk together: this program is the kernel's first one
+    /// there, and the system's own root is mounted in place of the ramdisk it
+    /// carries, so what the first stage would have mounted and made is made
+    /// here.
+    fn prepare_second_stage() -> Result<()> {
+        // /dev is this program's own, mounted already: the dirs and nodes the
+        // second stage's programs open are made in it.
+        for dir in ["/dev/pts", "/dev/socket", "/dev/dm-user"] {
+            fs::create_dir_all(dir).with_context(|| format!("make {dir}"))?;
+        }
+        mount("devpts", "/dev/pts", Some("devpts"), 0, None).context("mount devpts")?;
+        for (path, mode, dev) in [("/dev/random", 0o666, (1, 8)), ("/dev/urandom", 0o666, (1, 9)), ("/dev/ptmx", 0o666, (5, 2)), ("/dev/null", 0o666, (1, 3))] {
+            node(path, libc::S_IFCHR, mode, dev)?;
+        }
+        // The first stage mounts it before the policy the second stage reads
+        // is loaded through it; the kernel's own /sys holds its place where
+        // it makes one.
+        let _ = fs::create_dir_all("/sys/fs/selinux");
+        mount("selinuxfs", "/sys/fs/selinux", Some("selinuxfs"), 0, None).context("mount selinuxfs")?;
+        // The places the first stage mounts for the second one and for vold.
+        mount("tmpfs", "/mnt", Some("tmpfs"), libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV, Some("mode=0755")).context("mount /mnt")?;
+        for dir in ["/mnt/vendor", "/mnt/product", "/debug_ramdisk", "/second_stage_resources"] {
+            fs::create_dir_all(dir).with_context(|| format!("make {dir}"))?;
+        }
+        mount("tmpfs", "/debug_ramdisk", Some("tmpfs"), libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV, Some("mode=0755")).context("mount /debug_ramdisk")?;
+        mount("tmpfs", "/second_stage_resources", Some("tmpfs"), libc::MS_NOSUID | libc::MS_NODEV, Some("mode=0755")).context("mount /second_stage_resources")?;
+        // The system's own partitions are the dirs of this root: mounted as
+        // they are, the second stage finds them and mounts none of the
+        // installed system's over them.
+        for dir in ["/system_ext", "/product"] {
+            if Path::new(dir).is_dir() {
+                mount(dir, dir, None, libc::MS_BIND, None).with_context(|| format!("bind mount {dir} to itself"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The drivers the installed system's first stage loads, loaded from the
+    /// system's own root where its image keeps them: the old ways of a boot
+    /// that has none to load are none, and a driver that does not load leaves
+    /// the rest to load and the start to go on.
+    fn second_stage_modules() -> Result<()> {
+        let cmdline = fs::read_to_string("/proc/cmdline").context("read /proc/cmdline")?;
+        let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
+        let loaded = skyward_modules::modprobe::first_stage(&cmdline, &bootconfig, &[]).context("load the drivers")?;
+        log(&format!("{} modules loaded from {}", loaded.count, loaded.dir.display()));
+        for (_, e) in &loaded.failed {
+            log(&format!("{e:#}"));
+        }
+        Ok(())
+    }
+
+    /// Go over to the system's own root and start the second stage there, as
+    /// the first stage the kernel started would have: the system's root is
+    /// this one, so what the first stage mounts before the second begins is
+    /// set up here, and the init goes on as it does from the first stage's
+    /// ramdisk on the system's own phone.
+    fn hand_over_android(before: &Bcb) -> Result<!> {
+        go_over_into_root()?;
+        step("setting up for the system's second stage");
+        prepare_second_stage()?;
+        let path = c("/sbin:/system/sbin:/system/bin:/system/xbin");
+        check(unsafe { libc::setenv(c("PATH").as_ptr(), path.as_ptr(), 1) }, || "set PATH".into())?;
+        if let Err(e) = second_stage_modules() {
+            log(&format!("{e:#}"));
+        }
+        carrier_boot::watch_android()?;
+        ensure!(!GIVEN_UP.load(Ordering::SeqCst), "the start was given up before Android init");
+        // The private metadata now records an unfinished start until Android
+        // confirms it. Let Android use misc for intentional reboot requests.
+        bcb::write(Path::new(MISC_NODE), before)?;
+        step("starting the system's second stage");
+        exec_args("/system/bin/init", &["/system/bin/init", "selinux_setup"])
     }
 
     /// The request for the recovery, saying `why` the start stopped.
@@ -447,8 +597,18 @@ mod sys {
     /// from the recovery partition of the slot the phone started from,
     /// unpacked over the one the kernel unpacked, as the kernel unpacks it
     /// when the bootloader starts the recovery, and its own first program
-    /// started, once what the start set up is taken down.
+    /// started, once what the start set up is taken down. On a phone whose
+    /// boot image holds both systems' first ramdisks, the ramdisk the kernel
+    /// unpacked is the recovery's own, and the start that comes up is the
+    /// one the phone restarts into, with the request in misc in it.
     fn recovery() -> Result<!> {
+        if carrier() {
+            // The recovery's own ramdisk is the one the kernel unpacked, in
+            // the boot partition, and the bootloader starts it with the
+            // start the recovery asks for: the phone restarts into it, which
+            // the request in misc makes a recovery start of.
+            bail!("the boot partition holds the recovery's own ramdisk, so the phone restarts into the recovery instead");
+        }
         let name = format!("recovery{}", skyward_block::slot_suffix()?.unwrap_or_default());
         by_name(&name)?;
         let at = format!("{BY_NAME}/{name}");
@@ -507,13 +667,12 @@ mod sys {
 
     /// Restart into the recovery: at once, the drivers left as they are,
     /// where their own stopping holds the restart up.
-    fn restart() {
-        step("restarting into the recovery");
+    fn restart_to(target: &'static std::ffi::CStr) {
+        step(&format!("restarting with target {}", target.to_string_lossy()));
         unsafe { libc::sync() };
-        std::thread::spawn(|| {
-            let recovery = c("recovery");
+        std::thread::spawn(move || {
             unsafe {
-                libc::syscall(libc::SYS_reboot, libc::LINUX_REBOOT_MAGIC1, libc::LINUX_REBOOT_MAGIC2, libc::LINUX_REBOOT_CMD_RESTART2, recovery.as_ptr());
+                libc::syscall(libc::SYS_reboot, libc::LINUX_REBOOT_MAGIC1, libc::LINUX_REBOOT_MAGIC2, libc::LINUX_REBOOT_CMD_RESTART2, target.as_ptr());
             }
         });
         std::thread::sleep(RESTART_WAIT);
@@ -521,6 +680,10 @@ mod sys {
         if let Err(e) = fs::write("/proc/sysrq-trigger", "b") {
             log(&format!("restart at once: {e}"));
         }
+    }
+
+    fn restart() {
+        restart_to(c"recovery");
     }
 
     /// Give the start up where it has not reached the system's own first
@@ -532,6 +695,9 @@ mod sys {
     /// that the storage's come up all the same.
     fn watch() {
         std::thread::sleep(GIVE_UP);
+        if GIVEN_UP.load(Ordering::SeqCst) {
+            return;
+        }
         let during = STEP.lock().expect("nothing panics while it holds the step").clone();
         let still = match fs::read_to_string("/proc/modules") {
             Ok(text) => loading(&text),
@@ -551,8 +717,8 @@ mod sys {
                 log(&format!("{e:#}"));
             }
         }
-        report(&stalled(&during, GIVE_UP.as_secs(), &still));
         if !GIVEN_UP.swap(true, Ordering::SeqCst) {
+            report(&stalled(&during, GIVE_UP.as_secs(), &still));
             restart_or_stay(misc_asks());
         }
     }
@@ -570,10 +736,19 @@ mod sys {
         let drivers = modules(&[]);
         step("waiting for the misc partition");
         let found = partition("misc", MISC_NODE, PARTITION_TIMEOUT);
-        drivers?;
+        if let Err(e) = drivers {
+            if !carrier() {
+                return Err(e);
+            }
+            log(&format!("drivers from the recovery ramdisk: {e:#}"));
+        }
         found?;
         step("reading misc");
-        let held = bcb::read(Path::new(MISC_NODE))?;
+        let held = bcb::read(Path::new(MISC_NODE));
+        if carrier() && (!carrier_normal_boot()? || held.as_ref().is_ok_and(Bcb::asks_for_recovery)) {
+            carrier_boot::recover(held);
+        }
+        let held = held?;
         if held.asks_for_recovery() {
             log("misc asks for the recovery, and the bootloader started the slot");
             ASKED.store(true, Ordering::SeqCst);
@@ -605,13 +780,23 @@ mod sys {
         mount(node, NEW_ROOT, Some(&start.filesystem), 0, None)?;
         step(&format!("finding {} in the root", start.init));
         ensure!(startable(&start.init)?, "the root holds no program {} to start", start.init);
-        step("putting back what misc held");
-        bcb::write(Path::new(MISC_NODE), before)?;
+        let android = carrier() && boot::android_root(Path::new(NEW_ROOT), &start.init);
+        if android {
+            step("setting up private Android data and metadata");
+            carrier_boot::prepare_android(start)?;
+        }
         if GIVEN_UP.load(Ordering::SeqCst) {
             bail!("the start was given up on the way");
         }
-        step(&format!("handing over to {}", start.init));
-        let Err(e) = hand_over(&start.init);
+        let Err(e) = match android {
+            true => hand_over_android(before),
+            false => {
+                step("putting back what misc held");
+                bcb::write(Path::new(MISC_NODE), before)?;
+                step(&format!("handing over to {}", start.init));
+                hand_over(&start.init)
+            }
+        };
         report(&format!("{e:#}"));
         if !GIVEN_UP.swap(true, Ordering::SeqCst) {
             restart_or_stay(misc_asks());
@@ -686,5 +871,15 @@ mod tests {
         assert_eq!(uevent(text).unwrap(), ("sda30".into(), Some("userdata".into()), (259, 14)));
         assert_eq!(uevent("MAJOR=8\nMINOR=0\nDEVNAME=sda\nDEVTYPE=disk\n").unwrap().1, None, "a whole disk has no partition name");
         assert!(uevent("DEVNAME=sda\n").is_err());
+    }
+
+    #[test]
+    fn the_start_the_bootloader_says_is_the_systems_is_told_from_the_recoverys() {
+        let normal = "console=tty0 root=/dev/ram androidboot.force_normal_boot=1 androidboot.slot_suffix=_a";
+        assert!(normal_boot(normal, ""), "as the bootloader starts the system");
+        assert!(normal_boot("", "androidboot.force_normal_boot = \"1\"\n"), "as some put it in the bootconfig");
+        let recovery = "console=tty0 root=/dev/ram androidboot.mode=recovery androidboot.slot_suffix=_a";
+        assert!(!normal_boot(recovery, ""), "as the bootloader starts the recovery");
+        assert!(!normal_boot("", ""), "and as an older bootloader started it, saying nothing");
     }
 }
