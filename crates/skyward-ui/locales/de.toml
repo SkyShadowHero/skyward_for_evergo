@@ -1321,6 +1321,7 @@ mono = "Der Terminaltext ist in der Festbreitenschrift Kirk Mono gesetzt. Ihre L
 [systems]
 main = "Hauptsystem"
 second = "Zweitsystem"
+screen_lock_warning = "Warnung: Richte im Zweitsystem keine PIN, kein Muster und kein Passwort für die Displaysperre ein. Sonst lassen sich die Daten des Hauptsystems möglicherweise nie wieder entschlüsseln. Wenn du eine Displaysperre im Zweitsystem brauchst, verwende DSU Sideloader."
 second_failed = "Das Zweitsystem konnte nicht starten"
 switching = "System wird gewechselt"
 switching_to = "Wechsel zu {name}"

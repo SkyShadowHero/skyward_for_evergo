@@ -3,7 +3,7 @@ codename = "evergo"
 brand = "Redmi"
 model = "Redmi Note 11 5G"
 ab = true
-soc = { hans = "联发科天玑810", hant = "聯發科天璣810", en = "MediaTek Dimensity 810" }
+soc = { hans = "天玑810", hant = "天璣810", en = "MediaTek Dimensity 810" }
 # HyperOS keeps its own build name here; the vendor build names the older
 # boot image, not the system installed beside it.
 os_version_prop = "ro.mi.os.version.incremental"

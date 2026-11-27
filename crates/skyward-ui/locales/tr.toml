@@ -1321,6 +1321,7 @@ mono = "Terminal metni, eş aralıklı Kirk Mono yazı tipiyle gösterilir. Lisa
 [systems]
 main = "Ana sistem"
 second = "İkinci sistem"
+screen_lock_warning = "Uyarı: İkinci sistemde ekran kilidi için PIN, desen veya parola ayarlamayın. Bu, ana sistemin verilerinin şifresini çözmeyi kalıcı olarak engelleyebilir. İkinci sistemde ekran kilidine ihtiyacınız varsa DSU Sideloader kullanın."
 second_failed = "İkinci sistem başlatılamadı"
 switching = "Sistem geçişi yapılıyor"
 switching_to = "{name} sistemine geçiliyor"

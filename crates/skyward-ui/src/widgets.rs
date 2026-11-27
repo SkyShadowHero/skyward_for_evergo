@@ -1342,6 +1342,15 @@ pub fn footnote(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, text: &str) -> f32
 /// wrapped to the content width; a blank line starts a new paragraph.
 /// Returns where the text ends.
 pub fn paragraph(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, text: &str) -> f32 {
+    paragraph_with_ink(c, t, f, y, text, t.pal.info)
+}
+
+/// A warning in the theme's danger colour, wrapped to the content width.
+pub fn warning(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, text: &str) -> f32 {
+    paragraph_with_ink(c, t, f, y, text, t.pal.danger)
+}
+
+fn paragraph_with_ink(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, text: &str, ink: Rgba) -> f32 {
     let m = &t.m;
     let x = m.title_x + m.dp(0.9);
     let max_w = m.w as f32 - x - m.title_x;
@@ -1352,7 +1361,7 @@ pub fn paragraph(c: &mut Canvas, t: &Theme, f: &Fonts, y: f32, text: &str) -> f3
         }
         let lines: Vec<String> = para.lines().flat_map(|l| wrap(c, &f.body, l, m.sub_px, max_w)).collect();
         for line in &lines {
-            c.text_top(&f.body, line, x, top, m.sub_px, t.pal.info, None);
+            c.text_top(&f.body, line, x, top, m.sub_px, ink, None);
             top += m.sub_pitch;
         }
     }

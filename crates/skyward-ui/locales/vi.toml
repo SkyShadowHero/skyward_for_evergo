@@ -1321,6 +1321,7 @@ mono = "Chữ terminal dùng phông đơn cách Kirk Mono. Giấy phép của ph
 [systems]
 main = "Hệ thống chính"
 second = "Hệ thống thứ hai"
+screen_lock_warning = "Cảnh báo: Không đặt mã PIN, hình mở khóa hoặc mật khẩu khóa màn hình trong hệ thống thứ hai. Việc này có thể khiến dữ liệu của hệ thống chính vĩnh viễn không thể giải mã. Nếu bạn cần khóa màn hình trong hệ thống thứ hai, hãy dùng DSU Sideloader."
 second_failed = "Hệ thống thứ hai không khởi động được"
 switching = "Đang chuyển hệ thống"
 switching_to = "Đang chuyển sang {name}"

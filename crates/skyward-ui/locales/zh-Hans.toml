@@ -1314,6 +1314,7 @@ mono = "终端文字使用 Kirk Mono 等宽字体。该许可证允许自由使�
 [systems]
 main = "主系统"
 second = "第二系统"
+screen_lock_warning = "警告：请勿在第二系统中设置锁屏密码、PIN 或图案，否则主系统的数据可能永久无法解密。如需在第二系统使用锁屏密码，请改用 DSU Sideloader。"
 second_failed = "第二系统未能启动"
 switching = "正在切换系统"
 switching_to = "正在切换到 {name}"

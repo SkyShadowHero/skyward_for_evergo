@@ -1481,6 +1481,7 @@ mono = "The terminal text is set in the monospaced Kirk Mono. Its license lets t
 [systems]
 main = "Main system"
 second = "Second system"
+screen_lock_warning = "Warning: Don't set a lock screen PIN, pattern or password in the second system. Doing so can permanently prevent decryption of the main system's data. If you need a screen lock in the second system, use DSU Sideloader."
 second_failed = "The second system couldn't start"
 switching = "Switching systems"
 switching_to = "Switching to {name}"

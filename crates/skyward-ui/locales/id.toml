@@ -1314,6 +1314,7 @@ mono = "Teks terminal menggunakan Kirk Mono yang berlebar tetap. Lisensinya meng
 [systems]
 main = "Sistem utama"
 second = "Sistem kedua"
+screen_lock_warning = "Peringatan: Jangan atur PIN, pola, atau sandi kunci layar di sistem kedua. Hal ini dapat membuat data sistem utama tidak bisa didekripsi lagi. Jika perlu kunci layar di sistem kedua, gunakan DSU Sideloader."
 second_failed = "Sistem kedua tidak dapat booting"
 switching = "Beralih sistem"
 switching_to = "Beralih ke {name}"

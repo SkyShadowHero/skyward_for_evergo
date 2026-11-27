@@ -580,7 +580,7 @@ pub fn specs(cx: &Ctx) -> Frame {
     y = widgets::info_card(&mut c, t, f, y + gap, &[
         (l.pick(texts::specs::RECOVERY_VERSION), format!("Skyward {VERSION}")),
         (l.pick(texts::specs::KERNEL_VERSION), i.kernel.clone()),
-        (l.pick(texts::specs::MAINTAINER), "天影大侠 (SkyShadowHero)".to_string()),
+        (l.pick(texts::specs::MAINTAINER), l.among("天影大侠", "天影大俠", "SkyShadowHero").to_string()),
     ]);
 
     let mut boot = Vec::new();
@@ -3202,14 +3202,15 @@ pub fn systems(cx: &Ctx) -> Frame {
         let y = widgets::footnote(&mut c, t, f, y, l.pick(texts::systems::KEEP_POWER));
         return Frame::new(t, fit(c, t, y), out, title, top);
     }
+    let warning_end = widgets::warning(&mut c, t, f, top, l.pick(texts::systems::SCREEN_LOCK_WARNING));
     let systems = match &s.systems {
         Some(Ok(systems)) => systems,
         Some(Err(why)) => {
-            let list = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(texts::systems::UNREADABLE)).trail(Trail::None)]);
+            let list = widgets::list(&mut c, t, f, warning_end + t.m.card_gap, &[Row::new(l.pick(texts::systems::UNREADABLE)).trail(Trail::None)]);
             let y = widgets::footnote(&mut c, t, f, list.bottom, why);
             return Frame::new(t, fit(c, t, y), out, title, top);
         }
-        None => return Frame::new(t, fit(c, t, top), out, title, top),
+        None => return Frame::new(t, fit(c, t, warning_end), out, title, top),
     };
     let starts = starting(systems);
     let chosen = s.system_pick.unwrap_or(starts);
@@ -3231,7 +3232,7 @@ pub fn systems(cx: &Ctx) -> Frame {
             mark: SystemMark::Opens,
         },
     };
-    let y = widgets::section_first(&mut c, t, f, top, l.pick(texts::reboot::NEXT_BOOT));
+    let y = widgets::section(&mut c, t, f, warning_end, l.pick(texts::reboot::NEXT_BOOT));
     let shown = widgets::system_cards(&mut c, t, f, y, &[main, second]);
     let second_opens = match systems.other {
         Some(_) => Action::PickSystem(Who::Other),

@@ -1328,6 +1328,7 @@ mono = "Le texte du terminal est composé en Kirk Mono, une police à chasse fix
 [systems]
 main = "Système principal"
 second = "Second système"
+screen_lock_warning = "Attention : ne définissez ni code PIN, ni schéma, ni mot de passe de verrouillage dans le second système. Cela peut rendre les données du système principal définitivement indéchiffrables. Si vous avez besoin d’un verrouillage d’écran dans le second système, utilisez DSU Sideloader."
 second_failed = "Le second système n’a pas pu démarrer"
 switching = "Basculement de système"
 switching_to = "Basculement vers {name}"

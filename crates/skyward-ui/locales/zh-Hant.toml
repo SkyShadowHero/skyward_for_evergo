@@ -1314,6 +1314,7 @@ mono = "終端機文字使用 Kirk Mono 等寬字型。這份授權條款允許�
 [systems]
 main = "主系統"
 second = "第二系統"
+screen_lock_warning = "警告：請勿在第二系統中設定螢幕鎖定的 PIN 碼、圖案或密碼，否則主系統的資料可能永久無法解密。如需在第二系統使用螢幕鎖定，請改用 DSU Sideloader。"
 second_failed = "第二系統未能啟動"
 switching = "正在切換系統"
 switching_to = "正在切換到 {name}"

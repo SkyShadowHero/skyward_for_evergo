@@ -1314,6 +1314,7 @@ mono = "ターミナルの文字には等幅フォントの Kirk Mono を使用�
 [systems]
 main = "メインシステム"
 second = "セカンドシステム"
+screen_lock_warning = "警告：セカンドシステムで画面ロックの PIN、パターン、パスワードを設定しないでください。メインシステムのデータを二度と復号できなくなるおそれがあります。セカンドシステムで画面ロックが必要な場合は、DSU Sideloader を使用してください。"
 second_failed = "セカンドシステムを起動できませんでした"
 switching = "システムを切り替え中"
 switching_to = "{name} に切り替え中"

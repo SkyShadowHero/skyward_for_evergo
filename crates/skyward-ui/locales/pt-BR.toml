@@ -1328,6 +1328,7 @@ mono = "O texto do terminal usa a fonte monoespaçada Kirk Mono. A licença dela
 [systems]
 main = "Sistema principal"
 second = "Segundo sistema"
+screen_lock_warning = "Aviso: Não configure PIN, padrão ou senha de bloqueio de tela no segundo sistema. Isso pode impedir permanentemente a descriptografia dos dados do sistema principal. Se precisar de bloqueio de tela no segundo sistema, use o DSU Sideloader."
 second_failed = "O segundo sistema não iniciou"
 switching = "Trocando de sistema"
 switching_to = "Trocando para {name}"

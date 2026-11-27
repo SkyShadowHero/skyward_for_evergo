@@ -1328,6 +1328,7 @@ mono = "Il testo del terminale è composto nel font a spaziatura fissa Kirk Mono
 [systems]
 main = "Sistema principale"
 second = "Secondo sistema"
+screen_lock_warning = "Avviso: non impostare un PIN, una sequenza o una password di blocco schermo nel secondo sistema. Questo potrebbe impedire definitivamente di decifrare i dati del sistema principale. Se ti serve un blocco schermo nel secondo sistema, usa DSU Sideloader."
 second_failed = "Impossibile avviare il secondo sistema"
 switching = "Cambio di sistema in corso"
 switching_to = "Passaggio a {name}"
